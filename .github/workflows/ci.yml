@@ -1,0 +1,20 @@
+# GitHub Actions CI
+name: RetroPlay NES Emulator CI
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          pip install pygame numpy
+      - name: Import test
+        run: |
+          python -c "from nes_core import CPU, PPU, APU, Cartridge, Bus; print('All imports OK')"

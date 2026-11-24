@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+roms/
+*.nes
+*.state
+saves/
+.DS_Store
+Thumbs.db
