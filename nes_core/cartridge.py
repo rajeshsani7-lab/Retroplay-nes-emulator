@@ -1,9 +1,13 @@
 """
 NES Cartridge / ROM Loader
-Supports iNES format (.nes files) with Mapper 0 (NROM) — the most common mapper,
-used by games like Donkey Kong, Excitebike, and many others.
+Supports iNES format (.nes files).
 
-Mapper support can be expanded for more games.
+Supported Mappers:
+  0  - NROM     (Donkey Kong, Excitebike, Balloon Fight)
+  1  - MMC1     (Mega Man 2, Zelda, Metroid)
+  2  - UxROM    (Contra, Duck Tales, Mega Man, Castlevania)
+  3  - CNROM    (Donkey Kong Jr, Popeye)
+  227- Mapper227 (1200-in-1, 57-in-1 multicarts)
 """
 
 MAPPER_REGISTRY = {}
@@ -281,3 +285,68 @@ class Mapper3:
 
     def get_mirroring(self):
         return self.cart.header.mirroring
+
+
+# =============================================================================
+# Mapper 227 — 1200-in-1 / 57-in-1 Multicart
+# Used by: 1200-in-1 (J), 57-in-1 and similar multicarts
+#
+# Register at $8000-$FFFF controls banking:
+#   Bits: [A7-A6] = outer bank (selects 128K block)
+#         [A5]    = mode (0=NROM-128, 1=NROM-256)
+#         [A4-A1] = inner bank select
+#         [A0]    = mirroring (0=V, 1=H)
+# =============================================================================
+@register_mapper(227)
+class Mapper227:
+    def __init__(self, cart):
+        self.cart = cart
+        self.prg_bank_lo   = 0   # $8000-$BFFF
+        self.prg_bank_hi   = 0   # $C000-$FFFF
+        self._mirroring    = 'vertical'
+
+    def cpu_write(self, addr, data):
+        if addr >= 0x8000:
+            # Decode the register embedded in address lines
+            outer  = (addr >> 6) & 0x03   # bits A7-A6
+            inner  = (addr >> 1) & 0x0F   # bits A4-A1
+            mode   = (addr >> 5) & 0x01   # bit  A5
+            mirror = addr & 0x01           # bit  A0
+
+            self._mirroring = 'horizontal' if mirror else 'vertical'
+
+            bank = (outer << 4) | inner   # 32KB bank number
+
+            if mode == 0:
+                # NROM-128: lo and hi both map to same 16K bank
+                self.prg_bank_lo = bank
+                self.prg_bank_hi = bank
+            else:
+                # NROM-256: lo = bank & ~1,  hi = bank | 1
+                self.prg_bank_lo = bank & ~1
+                self.prg_bank_hi = bank | 1
+
+    def cpu_read(self, addr):
+        prg_len = len(self.cart.prg_rom)
+        if 0x6000 <= addr <= 0x7FFF:
+            return self.cart.prg_ram[addr - 0x6000]
+        if 0x8000 <= addr <= 0xBFFF:
+            offset = (self.prg_bank_lo * 0x4000 + (addr - 0x8000)) % prg_len
+            return self.cart.prg_rom[offset]
+        if addr >= 0xC000:
+            offset = (self.prg_bank_hi * 0x4000 + (addr - 0xC000)) % prg_len
+            return self.cart.prg_rom[offset]
+        return 0
+
+    def ppu_read(self, addr):
+        # CHR-RAM only (8 KB)
+        if addr < 0x2000:
+            return self.cart.chr_rom[addr % len(self.cart.chr_rom)]
+        return 0
+
+    def ppu_write(self, addr, data):
+        if addr < 0x2000:
+            self.cart.chr_rom[addr % len(self.cart.chr_rom)] = data
+
+    def get_mirroring(self):
+        return self._mirroring
