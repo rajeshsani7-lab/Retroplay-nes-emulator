@@ -89,7 +89,65 @@ class Bus:
             self.cart.cpu_write(addr, data)
 
     # -------------------------------------------------------------------------
-    # Main clock — drives the whole system
+    # Fast Frame Step (Scanline based - 10x-30x faster)
+    # -------------------------------------------------------------------------
+    def step_frame(self):
+        """Emulate one full video frame (262 scanlines) using fast scanline rendering."""
+        self.ppu.frame_complete = False
+        cycles_per_scanline = 341.0 / 3.0   # ~113.667 CPU cycles
+
+        # 1. Visible scanlines (0 to 239)
+        for scanline in range(240):
+            target = cycles_per_scanline
+            while target > 0:
+                if self.dma_active:
+                    self._handle_dma_fast()
+                    target -= 513
+                else:
+                    target -= self.cpu.step()
+            self.ppu.render_scanline(scanline)
+
+        # 2. Post-render scanline (240)
+        target = cycles_per_scanline
+        while target > 0:
+            if self.dma_active:
+                self._handle_dma_fast()
+                target -= 513
+            else:
+                target -= self.cpu.step()
+
+        # 3. VBlank (scanline 241)
+        self.ppu.status |= 0x80
+        if self.ppu.ctrl & 0x80:
+            self.cpu.nmi()
+        self.ppu.frame_complete = True
+
+        vblank_cycles = cycles_per_scanline * 20
+        while vblank_cycles > 0:
+            if self.dma_active:
+                self._handle_dma_fast()
+                vblank_cycles -= 513
+            else:
+                vblank_cycles -= self.cpu.step()
+
+        # 4. Pre-render scanline (261)
+        self.ppu.status &= ~0xE0
+        target = cycles_per_scanline
+        while target > 0:
+            if self.dma_active:
+                self._handle_dma_fast()
+                target -= 513
+            else:
+                target -= self.cpu.step()
+
+    def _handle_dma_fast(self):
+        page = self.dma_page << 8
+        for i in range(256):
+            self.ppu.oam[i] = self.cpu_read(page + i)
+        self.dma_active = False
+
+    # -------------------------------------------------------------------------
+    # Main clock — drives the whole system (cycle-accurate fallback)
     # -------------------------------------------------------------------------
     def clock(self):
         # PPU runs 3x faster than CPU

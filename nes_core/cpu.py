@@ -27,6 +27,8 @@ class CPU:
 
         self.cycles = 0     # Remaining cycles for current instruction
         self.total_cycles = 0
+        self.nmi_pending = False
+        self.irq_pending = False
 
         # Build instruction table
         self._build_opcode_table()
@@ -86,6 +88,8 @@ class CPU:
         self.y = 0
         self.sp = 0xFD
         self.status = 0x24
+        self.nmi_pending = False
+        self.irq_pending = False
         lo = self.read(0xFFFC)
         hi = self.read(0xFFFD)
         self.pc = (hi << 8) | lo
@@ -93,7 +97,31 @@ class CPU:
         self.total_cycles = 0
 
     def irq(self):
-        if self.get_flag(self.FLAG_I) == 0:
+        self.irq_pending = True
+
+    def nmi(self):
+        self.nmi_pending = True
+
+    # -------------------------------------------------------------------------
+    # Fast Step (one instruction at a time)
+    # -------------------------------------------------------------------------
+    def step(self):
+        """Execute one complete instruction and return the number of CPU cycles consumed."""
+        if self.nmi_pending:
+            self.nmi_pending = False
+            self.push16(self.pc)
+            self.set_flag(self.FLAG_B, 0)
+            self.set_flag(self.FLAG_U, 1)
+            self.set_flag(self.FLAG_I, 1)
+            self.push(self.status)
+            lo = self.read(0xFFFA)
+            hi = self.read(0xFFFB)
+            self.pc = (hi << 8) | lo
+            self.total_cycles += 7
+            return 7
+
+        if self.irq_pending and self.get_flag(self.FLAG_I) == 0:
+            self.irq_pending = False
             self.push16(self.pc)
             self.set_flag(self.FLAG_B, 0)
             self.set_flag(self.FLAG_U, 1)
@@ -102,18 +130,25 @@ class CPU:
             lo = self.read(0xFFFE)
             hi = self.read(0xFFFF)
             self.pc = (hi << 8) | lo
-            self.cycles = 7
+            self.total_cycles += 7
+            return 7
 
-    def nmi(self):
-        self.push16(self.pc)
-        self.set_flag(self.FLAG_B, 0)
+        opcode = self.read(self.pc)
+        self.pc = (self.pc + 1) & 0xFFFF
         self.set_flag(self.FLAG_U, 1)
-        self.set_flag(self.FLAG_I, 1)
-        self.push(self.status)
-        lo = self.read(0xFFFA)
-        hi = self.read(0xFFFB)
-        self.pc = (hi << 8) | lo
-        self.cycles = 8
+
+        entry = self.opcodes.get(opcode)
+        if entry is None:
+            cycles = 2
+        else:
+            fn, addr_mode, base_cycles = entry
+            addr, page_crossed = addr_mode()
+            extra = fn(addr, page_crossed)
+            cycles = base_cycles + (1 if extra else 0)
+
+        self.set_flag(self.FLAG_U, 1)
+        self.total_cycles += cycles
+        return cycles
 
     # -------------------------------------------------------------------------
     # Clock
@@ -124,15 +159,14 @@ class CPU:
             self.pc = (self.pc + 1) & 0xFFFF
             self.set_flag(self.FLAG_U, 1)
 
-            instr = self.opcodes.get(opcode)
-            if instr is None:
-                # Unknown opcode — NOP
+            entry = self.opcodes.get(opcode)
+            if entry is None:
                 self.cycles = 2
             else:
-                name, addr_mode, base_cycles = instr
+                fn, addr_mode, base_cycles = entry
                 self.cycles = base_cycles
                 addr, page_crossed = addr_mode()
-                extra = getattr(self, name)(addr, page_crossed)
+                extra = fn(addr, page_crossed)
                 if extra:
                     self.cycles += 1
 
@@ -464,61 +498,61 @@ class CPU:
         IY = self._izy
         R = self._rel
 
-        # Format: opcode -> (method_name, addr_mode_fn, base_cycles)
+        # Format: opcode -> (method, addr_mode_fn, base_cycles)
         self.opcodes = {
-            0x00: ('BRK', I,  7),  0x01: ('ORA', IX, 6),  0x05: ('ORA', Z,  3),
-            0x06: ('ASL', Z,  5),  0x08: ('PHP', I,  3),  0x09: ('ORA', M,  2),
-            0x0A: ('ASL', I,  2),  0x0D: ('ORA', A,  4),  0x0E: ('ASL', A,  6),
-            0x10: ('BPL', R,  2),  0x11: ('ORA', IY, 5),  0x15: ('ORA', ZX, 4),
-            0x16: ('ASL', ZX, 6),  0x18: ('CLC', I,  2),  0x19: ('ORA', AY, 4),
-            0x1D: ('ORA', AX, 4),  0x1E: ('ASL', AX, 7),
-            0x20: ('JSR', A,  6),  0x21: ('AND', IX, 6),  0x24: ('BIT', Z,  3),
-            0x25: ('AND', Z,  3),  0x26: ('ROL', Z,  5),  0x28: ('PLP', I,  4),
-            0x29: ('AND', M,  2),  0x2A: ('ROL', I,  2),  0x2C: ('BIT', A,  4),
-            0x2D: ('AND', A,  4),  0x2E: ('ROL', A,  6),
-            0x30: ('BMI', R,  2),  0x31: ('AND', IY, 5),  0x35: ('AND', ZX, 4),
-            0x36: ('ROL', ZX, 6),  0x38: ('SEC', I,  2),  0x39: ('AND', AY, 4),
-            0x3D: ('AND', AX, 4),  0x3E: ('ROL', AX, 7),
-            0x40: ('RTI', I,  6),  0x41: ('EOR', IX, 6),  0x45: ('EOR', Z,  3),
-            0x46: ('LSR', Z,  5),  0x48: ('PHA', I,  3),  0x49: ('EOR', M,  2),
-            0x4A: ('LSR', I,  2),  0x4C: ('JMP', A,  3),  0x4D: ('EOR', A,  4),
-            0x4E: ('LSR', A,  6),
-            0x50: ('BVC', R,  2),  0x51: ('EOR', IY, 5),  0x55: ('EOR', ZX, 4),
-            0x56: ('LSR', ZX, 6),  0x58: ('CLI', I,  2),  0x59: ('EOR', AY, 4),
-            0x5D: ('EOR', AX, 4),  0x5E: ('LSR', AX, 7),
-            0x60: ('RTS', I,  6),  0x61: ('ADC', IX, 6),  0x65: ('ADC', Z,  3),
-            0x66: ('ROR', Z,  5),  0x68: ('PLA', I,  4),  0x69: ('ADC', M,  2),
-            0x6A: ('ROR', I,  2),  0x6C: ('JMP', IN, 5),  0x6D: ('ADC', A,  4),
-            0x6E: ('ROR', A,  6),
-            0x70: ('BVS', R,  2),  0x71: ('ADC', IY, 5),  0x75: ('ADC', ZX, 4),
-            0x76: ('ROR', ZX, 6),  0x78: ('SEI', I,  2),  0x79: ('ADC', AY, 4),
-            0x7D: ('ADC', AX, 4),  0x7E: ('ROR', AX, 7),
-            0x81: ('STA', IX, 6),  0x84: ('STY', Z,  3),  0x85: ('STA', Z,  3),
-            0x86: ('STX', Z,  3),  0x88: ('DEY', I,  2),  0x8A: ('TXA', I,  2),
-            0x8C: ('STY', A,  4),  0x8D: ('STA', A,  4),  0x8E: ('STX', A,  4),
-            0x90: ('BCC', R,  2),  0x91: ('STA', IY, 6),  0x94: ('STY', ZX, 4),
-            0x95: ('STA', ZX, 4),  0x96: ('STX', ZY, 4),  0x98: ('TYA', I,  2),
-            0x99: ('STA', AY, 5),  0x9A: ('TXS', I,  2),  0x9D: ('STA', AX, 5),
-            0xA0: ('LDY', M,  2),  0xA1: ('LDA', IX, 6),  0xA2: ('LDX', M,  2),
-            0xA4: ('LDY', Z,  3),  0xA5: ('LDA', Z,  3),  0xA6: ('LDX', Z,  3),
-            0xA8: ('TAY', I,  2),  0xA9: ('LDA', M,  2),  0xAA: ('TAX', I,  2),
-            0xAC: ('LDY', A,  4),  0xAD: ('LDA', A,  4),  0xAE: ('LDX', A,  4),
-            0xB0: ('BCS', R,  2),  0xB1: ('LDA', IY, 5),  0xB4: ('LDY', ZX, 4),
-            0xB5: ('LDA', ZX, 4),  0xB6: ('LDX', ZY, 4),  0xB8: ('CLV', I,  2),
-            0xB9: ('LDA', AY, 4),  0xBA: ('TSX', I,  2),  0xBC: ('LDY', AX, 4),
-            0xBD: ('LDA', AX, 4),  0xBE: ('LDX', AY, 4),
-            0xC0: ('CPY', M,  2),  0xC1: ('CMP', IX, 6),  0xC4: ('CPY', Z,  3),
-            0xC5: ('CMP', Z,  3),  0xC6: ('DEC', Z,  5),  0xC8: ('INY', I,  2),
-            0xC9: ('CMP', M,  2),  0xCA: ('DEX', I,  2),  0xCC: ('CPY', A,  4),
-            0xCD: ('CMP', A,  4),  0xCE: ('DEC', A,  6),
-            0xD0: ('BNE', R,  2),  0xD1: ('CMP', IY, 5),  0xD5: ('CMP', ZX, 4),
-            0xD6: ('DEC', ZX, 6),  0xD8: ('CLD', I,  2),  0xD9: ('CMP', AY, 4),
-            0xDD: ('CMP', AX, 4),  0xDE: ('DEC', AX, 7),
-            0xE0: ('CPX', M,  2),  0xE1: ('SBC', IX, 6),  0xE4: ('CPX', Z,  3),
-            0xE5: ('SBC', Z,  3),  0xE6: ('INC', Z,  5),  0xE8: ('INX', I,  2),
-            0xE9: ('SBC', M,  2),  0xEA: ('NOP', I,  2),  0xEC: ('CPX', A,  4),
-            0xED: ('SBC', A,  4),  0xEE: ('INC', A,  6),
-            0xF0: ('BEQ', R,  2),  0xF1: ('SBC', IY, 5),  0xF5: ('SBC', ZX, 4),
-            0xF6: ('INC', ZX, 6),  0xF8: ('SED', I,  2),  0xF9: ('SBC', AY, 4),
-            0xFD: ('SBC', AX, 4),  0xFE: ('INC', AX, 7),
+            0x00: (self.BRK, I,  7),  0x01: (self.ORA, IX, 6),  0x05: (self.ORA, Z,  3),
+            0x06: (self.ASL, Z,  5),  0x08: (self.PHP, I,  3),  0x09: (self.ORA, M,  2),
+            0x0A: (self.ASL, I,  2),  0x0D: (self.ORA, A,  4),  0x0E: (self.ASL, A,  6),
+            0x10: (self.BPL, R,  2),  0x11: (self.ORA, IY, 5),  0x15: (self.ORA, ZX, 4),
+            0x16: (self.ASL, ZX, 6),  0x18: (self.CLC, I,  2),  0x19: (self.ORA, AY, 4),
+            0x1D: (self.ORA, AX, 4),  0x1E: (self.ASL, AX, 7),
+            0x20: (self.JSR, A,  6),  0x21: (self.AND, IX, 6),  0x24: (self.BIT, Z,  3),
+            0x25: (self.AND, Z,  3),  0x26: (self.ROL, Z,  5),  0x28: (self.PLP, I,  4),
+            0x29: (self.AND, M,  2),  0x2A: (self.ROL, I,  2),  0x2C: (self.BIT, A,  4),
+            0x2D: (self.AND, A,  4),  0x2E: (self.ROL, A,  6),
+            0x30: (self.BMI, R,  2),  0x31: (self.AND, IY, 5),  0x35: (self.AND, ZX, 4),
+            0x36: (self.ROL, ZX, 6),  0x38: (self.SEC, I,  2),  0x39: (self.AND, AY, 4),
+            0x3D: (self.AND, AX, 4),  0x3E: (self.ROL, AX, 7),
+            0x40: (self.RTI, I,  6),  0x41: (self.EOR, IX, 6),  0x45: (self.EOR, Z,  3),
+            0x46: (self.LSR, Z,  5),  0x48: (self.PHA, I,  3),  0x49: (self.EOR, M,  2),
+            0x4A: (self.LSR, I,  2),  0x4C: (self.JMP, A,  3),  0x4D: (self.EOR, A,  4),
+            0x4E: (self.LSR, A,  6),
+            0x50: (self.BVC, R,  2),  0x51: (self.EOR, IY, 5),  0x55: (self.EOR, ZX, 4),
+            0x56: (self.LSR, ZX, 6),  0x58: (self.CLI, I,  2),  0x59: (self.EOR, AY, 4),
+            0x5D: (self.EOR, AX, 4),  0x5E: (self.LSR, AX, 7),
+            0x60: (self.RTS, I,  6),  0x61: (self.ADC, IX, 6),  0x65: (self.ADC, Z,  3),
+            0x66: (self.ROR, Z,  5),  0x68: (self.PLA, I,  4),  0x69: (self.ADC, M,  2),
+            0x6A: (self.ROR, I,  2),  0x6C: (self.JMP, IN, 5),  0x6D: (self.ADC, A,  4),
+            0x6E: (self.ROR, A,  6),
+            0x70: (self.BVS, R,  2),  0x71: (self.ADC, IY, 5),  0x75: (self.ADC, ZX, 4),
+            0x76: (self.ROR, ZX, 6),  0x78: (self.SEI, I,  2),  0x79: (self.ADC, AY, 4),
+            0x7D: (self.ADC, AX, 4),  0x7E: (self.ROR, AX, 7),
+            0x81: (self.STA, IX, 6),  0x84: (self.STY, Z,  3),  0x85: (self.STA, Z,  3),
+            0x86: (self.STX, Z,  3),  0x88: (self.DEY, I,  2),  0x8A: (self.TXA, I,  2),
+            0x8C: (self.STY, A,  4),  0x8D: (self.STA, A,  4),  0x8E: (self.STX, A,  4),
+            0x90: (self.BCC, R,  2),  0x91: (self.STA, IY, 6),  0x94: (self.STY, ZX, 4),
+            0x95: (self.STA, ZX, 4),  0x96: (self.STX, ZY, 4),  0x98: (self.TYA, I,  2),
+            0x99: (self.STA, AY, 5),  0x9A: (self.TXS, I,  2),  0x9D: (self.STA, AX, 5),
+            0xA0: (self.LDY, M,  2),  0xA1: (self.LDA, IX, 6),  0xA2: (self.LDX, M,  2),
+            0xA4: (self.LDY, Z,  3),  0xA5: (self.LDA, Z,  3),  0xA6: (self.LDX, Z,  3),
+            0xA8: (self.TAY, I,  2),  0xA9: (self.LDA, M,  2),  0xAA: (self.TAX, I,  2),
+            0xAC: (self.LDY, A,  4),  0xAD: (self.LDA, A,  4),  0xAE: (self.LDX, A,  4),
+            0xB0: (self.BCS, R,  2),  0xB1: (self.LDA, IY, 5),  0xB4: (self.LDY, ZX, 4),
+            0xB5: (self.LDA, ZX, 4),  0xB6: (self.LDX, ZY, 4),  0xB8: (self.CLV, I,  2),
+            0xB9: (self.LDA, AY, 4),  0xBA: (self.TSX, I,  2),  0xBC: (self.LDY, AX, 4),
+            0xBD: (self.LDA, AX, 4),  0xBE: (self.LDX, AY, 4),
+            0xC0: (self.CPY, M,  2),  0xC1: (self.CMP, IX, 6),  0xC4: (self.CPY, Z,  3),
+            0xC5: (self.CMP, Z,  3),  0xC6: (self.DEC, Z,  5),  0xC8: (self.INY, I,  2),
+            0xC9: (self.CMP, M,  2),  0xCA: (self.DEX, I,  2),  0xCC: (self.CPY, A,  4),
+            0xCD: (self.CMP, A,  4),  0xCE: (self.DEC, A,  6),
+            0xD0: (self.BNE, R,  2),  0xD1: (self.CMP, IY, 5),  0xD5: (self.CMP, ZX, 4),
+            0xD6: (self.DEC, ZX, 6),  0xD8: (self.CLD, I,  2),  0xD9: (self.CMP, AY, 4),
+            0xDD: (self.CMP, AX, 4),  0xDE: (self.DEC, AX, 7),
+            0xE0: (self.CPX, M,  2),  0xE1: (self.SBC, IX, 6),  0xE4: (self.CPX, Z,  3),
+            0xE5: (self.SBC, Z,  3),  0xE6: (self.INC, Z,  5),  0xE8: (self.INX, I,  2),
+            0xE9: (self.SBC, M,  2),  0xEA: (self.NOP, I,  2),  0xEC: (self.CPX, A,  4),
+            0xED: (self.SBC, A,  4),  0xEE: (self.INC, A,  6),
+            0xF0: (self.BEQ, R,  2),  0xF1: (self.SBC, IY, 5),  0xF5: (self.SBC, ZX, 4),
+            0xF6: (self.INC, ZX, 6),  0xF8: (self.SED, I,  2),  0xF9: (self.SBC, AY, 4),
+            0xFD: (self.SBC, AX, 4),  0xFE: (self.INC, AX, 7),
         }

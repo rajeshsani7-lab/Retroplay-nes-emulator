@@ -186,6 +186,142 @@ class PPU:
         return r, g, b
 
     # -------------------------------------------------------------------------
+    # Fast Scanline Renderer (10-30x faster than dot-by-dot simulation)
+    # -------------------------------------------------------------------------
+    def render_scanline(self, scanline):
+        if scanline < 0 or scanline >= 240:
+            return
+
+        show_bg = bool(self.mask & 0x08)
+        show_sp = bool(self.mask & 0x10)
+
+        # Pre-resolve active 32 palette colors
+        pal_rgb = [NES_PALETTE[self.palette[i] & 0x3F] for i in range(32)]
+        bg_col = pal_rgb[0]
+
+        bg_pixel_line = bytearray(256)
+        bg_pal_line = bytearray(256)
+
+        # 1. Background
+        if show_bg:
+            bg_table = (self.ctrl >> 4) & 1
+            fine_x = self.x
+            base_nt_x = self.ctrl & 1
+            base_nt_y = (self.ctrl >> 1) & 1
+
+            total_y = (base_nt_y * 240 + self.scroll_y + scanline) % 480
+            nt_y = total_y // 240
+            fine_y = total_y % 8
+            coarse_y = (total_y % 240) // 8
+
+            total_base_x = base_nt_x * 256 + self.scroll_x
+            vram = self.vram
+            mirror = self.bus.cart.mirroring
+            chr_rom = self.bus.cart.chr_rom
+
+            for tile_col in range(33):
+                cur_x = total_base_x + tile_col * 8
+                nt_x = (cur_x // 256) & 1
+                coarse_x = (cur_x % 256) // 8
+
+                nt_id = (nt_y << 1) | nt_x
+                if mirror == 'horizontal':
+                    table_idx = (nt_id >> 1) & 1
+                else:  # vertical
+                    table_idx = nt_id & 1
+                vram_base = table_idx * 1024
+
+                tile_id = vram[vram_base + coarse_y * 32 + coarse_x]
+                attr_byte = vram[vram_base + 960 + (coarse_y // 4) * 8 + (coarse_x // 4)]
+                shift = ((coarse_y & 2) << 1) | (coarse_x & 2)
+                pal_idx = (attr_byte >> shift) & 3
+
+                p_addr = (bg_table << 12) | (tile_id << 4) | fine_y
+                p0 = chr_rom[p_addr] if p_addr < len(chr_rom) else 0
+                p1 = chr_rom[p_addr + 8] if (p_addr + 8) < len(chr_rom) else 0
+
+                sx_start = tile_col * 8 - fine_x
+                for px in range(8):
+                    sx = sx_start + px
+                    if 0 <= sx < 256:
+                        bit = 7 - px
+                        pixel = (((p1 >> bit) & 1) << 1) | ((p0 >> bit) & 1)
+                        bg_pixel_line[sx] = pixel
+                        bg_pal_line[sx] = pal_idx
+
+        # 2. Sprites & Sprite 0 hit
+        sp_pixel_line = bytearray(256)
+        sp_pal_line = bytearray(256)
+        sp_prio_line = bytearray(256)
+        sp0_line = bytearray(256)
+
+        if show_sp:
+            sprite_size = 16 if (self.ctrl & 0x20) else 8
+            chr_rom = self.bus.cart.chr_rom
+
+            # Evaluate OAM backwards (lowest index sprite wins priority)
+            for i in range(63, -1, -1):
+                sy = self.oam[i * 4 + 0] + 1
+                diff = scanline - sy
+                if 0 <= diff < sprite_size:
+                    tile = self.oam[i * 4 + 1]
+                    attr = self.oam[i * 4 + 2]
+                    sx = self.oam[i * 4 + 3]
+
+                    flip_v = bool(attr & 0x80)
+                    flip_h = bool(attr & 0x40)
+                    priority = bool(attr & 0x20)
+                    pal_idx = (attr & 3) + 4
+
+                    row = sprite_size - 1 - diff if flip_v else diff
+                    if sprite_size == 8:
+                        table = (self.ctrl >> 3) & 1
+                        addr = (table << 12) | (tile << 4) | row
+                    else:
+                        table = tile & 1
+                        t_id = tile & ~1
+                        if row >= 8:
+                            t_id += 1
+                            row -= 8
+                        addr = (table << 12) | (t_id << 4) | row
+
+                    p0 = chr_rom[addr] if addr < len(chr_rom) else 0
+                    p1 = chr_rom[addr + 8] if (addr + 8) < len(chr_rom) else 0
+
+                    for px in range(8):
+                        col_x = sx + (7 - px if flip_h else px)
+                        if 0 <= col_x < 256:
+                            bit = 7 - px
+                            pixel = (((p1 >> bit) & 1) << 1) | ((p0 >> bit) & 1)
+                            if pixel != 0:
+                                sp_pixel_line[col_x] = pixel
+                                sp_pal_line[col_x] = pal_idx
+                                sp_prio_line[col_x] = 1 if priority else 0
+                                if i == 0:
+                                    sp0_line[col_x] = 1
+
+        # 3. Composite line into RGB frame buffer
+        frame_line = self.frame[scanline]
+        for x in range(256):
+            bg_p = bg_pixel_line[x]
+            sp_p = sp_pixel_line[x]
+
+            if sp0_line[x] and bg_p != 0 and x < 255:
+                self.status |= 0x40  # Sprite 0 hit!
+
+            if bg_p == 0 and sp_p == 0:
+                frame_line[x] = bg_col
+            elif bg_p == 0:
+                frame_line[x] = pal_rgb[(sp_pal_line[x] << 2) | sp_p]
+            elif sp_p == 0:
+                frame_line[x] = pal_rgb[(bg_pal_line[x] << 2) | bg_p]
+            else:
+                if sp_prio_line[x] == 0:
+                    frame_line[x] = pal_rgb[(sp_pal_line[x] << 2) | sp_p]
+                else:
+                    frame_line[x] = pal_rgb[(bg_pal_line[x] << 2) | bg_p]
+
+    # -------------------------------------------------------------------------
     # Clock — called once per PPU cycle
     # -------------------------------------------------------------------------
     def clock(self):

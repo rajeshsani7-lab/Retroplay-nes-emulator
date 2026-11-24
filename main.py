@@ -161,10 +161,8 @@ class NESEmulator:
 
     # ─────────────────────────────────────────────────────────────────────────
     def _emulate_frame(self):
-        """Run enough bus clocks to produce one complete video frame."""
-        self.bus.ppu.frame_complete = False
-        while not self.bus.ppu.frame_complete:
-            self.bus.clock()
+        """Run one complete video frame with fast scanline rendering."""
+        self.bus.step_frame()
 
     # ─────────────────────────────────────────────────────────────────────────
     def _render_frame(self):

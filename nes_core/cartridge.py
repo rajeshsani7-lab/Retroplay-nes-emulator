@@ -307,22 +307,22 @@ class Mapper227:
 
     def cpu_write(self, addr, data):
         if addr >= 0x8000:
-            # Decode the register embedded in address lines
             outer  = (addr >> 6) & 0x03   # bits A7-A6
             inner  = (addr >> 1) & 0x0F   # bits A4-A1
             mode   = (addr >> 5) & 0x01   # bit  A5
             mirror = addr & 0x01           # bit  A0
 
             self._mirroring = 'horizontal' if mirror else 'vertical'
+            bank = (outer << 4) | inner
 
-            bank = (outer << 4) | inner   # 32KB bank number
-
-            if mode == 0:
-                # NROM-128: lo and hi both map to same 16K bank
+            # When bit 12 is set (e.g., $9018 during menu loader), bank 0 is fixed at $C000-$FFFF
+            if (addr >> 12) & 1:
+                self.prg_bank_lo = bank
+                self.prg_bank_hi = 0
+            elif mode == 0:
                 self.prg_bank_lo = bank
                 self.prg_bank_hi = bank
             else:
-                # NROM-256: lo = bank & ~1,  hi = bank | 1
                 self.prg_bank_lo = bank & ~1
                 self.prg_bank_hi = bank | 1
 
