@@ -105,15 +105,15 @@ class Cartridge:
 class Mapper0:
     def __init__(self, cart):
         self.cart = cart
-        self.prg_banks = len(cart.prg_rom) // 16384  # 1 or 2
+        self.prg_rom = cart.prg_rom
+        self.prg_len = len(cart.prg_rom)
+        self.mask = 0x3FFF if self.prg_len == 16384 else 0x7FFF
 
     def cpu_read(self, addr):
-        if 0x6000 <= addr <= 0x7FFF:
-            return self.cart.prg_ram[addr - 0x6000]
         if addr >= 0x8000:
-            # Mirror second bank if only 1 bank
-            idx = (addr - 0x8000) % len(self.cart.prg_rom)
-            return self.cart.prg_rom[idx]
+            return self.prg_rom[(addr - 0x8000) & self.mask]
+        elif 0x6000 <= addr <= 0x7FFF:
+            return self.cart.prg_ram[addr - 0x6000]
         return 0
 
     def cpu_write(self, addr, data):
@@ -224,23 +224,24 @@ class Mapper1:
 class Mapper2:
     def __init__(self, cart):
         self.cart = cart
-        self.prg_bank_select = 0
+        self.prg_rom = cart.prg_rom
+        self.prg_len = len(cart.prg_rom)
+        self.prg_bank_lo_base = 0 - 0x8000
+        self.prg_bank_hi_base = (self.prg_len - 16384) - 0xC000
 
     def cpu_read(self, addr):
-        if 0x6000 <= addr <= 0x7FFF:
-            return self.cart.prg_ram[addr - 0x6000]
-        if 0x8000 <= addr <= 0xBFFF:
-            bank = self.prg_bank_select * 16384
-            return self.cart.prg_rom[(bank + (addr - 0x8000)) % len(self.cart.prg_rom)]
         if addr >= 0xC000:
-            # Always last bank
-            last = len(self.cart.prg_rom) - 16384
-            return self.cart.prg_rom[(last + (addr - 0xC000)) % len(self.cart.prg_rom)]
+            return self.prg_rom[self.prg_bank_hi_base + addr]
+        elif addr >= 0x8000:
+            return self.prg_rom[self.prg_bank_lo_base + addr]
+        elif 0x6000 <= addr <= 0x7FFF:
+            return self.cart.prg_ram[addr - 0x6000]
         return 0
 
     def cpu_write(self, addr, data):
         if addr >= 0x8000:
-            self.prg_bank_select = data & 0x0F
+            bank = (data & 0x0F) * 16384
+            self.prg_bank_lo_base = (bank % self.prg_len) - 0x8000
 
     def ppu_read(self, addr):
         if addr < 0x2000:
@@ -248,8 +249,7 @@ class Mapper2:
         return 0
 
     def ppu_write(self, addr, data):
-        if addr < 0x2000:
-            self.cart.chr_rom[addr % len(self.cart.chr_rom)] = data
+        pass
 
     def get_mirroring(self):
         return self.cart.header.mirroring
@@ -294,8 +294,14 @@ class Mapper3:
 class Mapper227:
     def __init__(self, cart):
         self.cart = cart
+        self.prg_rom = cart.prg_rom
+        self.prg_len = len(cart.prg_rom)
+        self.chr_rom = cart.chr_rom
+        self.chr_len = len(cart.chr_rom)
         self.prg_bank_lo = 0
         self.prg_bank_hi = 0
+        self.prg_lo_base = 0 - 0x8000
+        self.prg_hi_base = 0 - 0xC000
         self._mirroring = 'vertical'
         self.chr_writable = True
         self.sync(0)
@@ -334,31 +340,30 @@ class Mapper227:
 
         m = ((latche >> 1) & 1) ^ 1
         self._mirroring = 'vertical' if m else 'horizontal'
+        self.prg_lo_base = ((self.prg_bank_lo * 0x4000) % self.prg_len) - 0x8000
+        self.prg_hi_base = ((self.prg_bank_hi * 0x4000) % self.prg_len) - 0xC000
 
     def cpu_write(self, addr, data):
         if addr >= 0x8000:
             self.sync(addr)
 
     def cpu_read(self, addr):
-        prg_len = len(self.cart.prg_rom)
-        if 0x6000 <= addr <= 0x7FFF:
-            return self.cart.prg_ram[addr - 0x6000]
-        if 0x8000 <= addr <= 0xBFFF:
-            offset = (self.prg_bank_lo * 0x4000 + (addr - 0x8000)) % prg_len
-            return self.cart.prg_rom[offset]
         if addr >= 0xC000:
-            offset = (self.prg_bank_hi * 0x4000 + (addr - 0xC000)) % prg_len
-            return self.cart.prg_rom[offset]
+            return self.prg_rom[self.prg_hi_base + addr]
+        elif addr >= 0x8000:
+            return self.prg_rom[self.prg_lo_base + addr]
+        elif 0x6000 <= addr <= 0x7FFF:
+            return self.cart.prg_ram[addr - 0x6000]
         return 0
 
     def ppu_read(self, addr):
         if addr < 0x2000:
-            return self.cart.chr_rom[addr % len(self.cart.chr_rom)]
+            return self.chr_rom[addr % self.chr_len] if self.chr_len else 0
         return 0
 
     def ppu_write(self, addr, data):
-        if addr < 0x2000 and self.chr_writable:
-            self.cart.chr_rom[addr % len(self.cart.chr_rom)] = data
+        if addr < 0x2000 and self.chr_writable and self.chr_len:
+            self.chr_rom[addr % self.chr_len] = data
 
     def get_mirroring(self):
         return self._mirroring

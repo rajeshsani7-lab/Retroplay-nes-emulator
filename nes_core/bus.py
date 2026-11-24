@@ -48,16 +48,18 @@ class Bus:
     # -------------------------------------------------------------------------
     def cpu_read(self, addr):
         addr &= 0xFFFF
-        if addr <= 0x1FFF:
+        if addr >= 0x8000:
+            return self.cart.cpu_read(addr)
+        elif addr <= 0x1FFF:
             return self.ram[addr & 0x07FF]
         elif addr <= 0x3FFF:
             return self.ppu.reg_read(addr & 0x0007)
-        elif addr == 0x4015:
-            return self.apu.read_status()
         elif addr == 0x4016:
             data = (self._ctrl1_shift >> 7) & 1
             self._ctrl1_shift = (self._ctrl1_shift << 1) & 0xFF
             return data
+        elif addr == 0x4015:
+            return self.apu.read_status()
         elif addr == 0x4017:
             data = (self._ctrl2_shift >> 7) & 1
             self._ctrl2_shift = (self._ctrl2_shift << 1) & 0xFF
@@ -91,7 +93,7 @@ class Bus:
     # -------------------------------------------------------------------------
     # Fast Frame Step (Scanline based - 10x-30x faster)
     # -------------------------------------------------------------------------
-    def step_frame(self):
+    def step_frame(self, render=True):
         """Emulate one full video frame (262 scanlines) using fast scanline rendering."""
         self.ppu.frame_complete = False
         cycles_per_scanline = 341.0 / 3.0   # ~113.667 CPU cycles
@@ -105,7 +107,7 @@ class Bus:
                     target -= 513
                 else:
                     target -= self.cpu.step()
-            self.ppu.render_scanline(scanline)
+            self.ppu.render_scanline(scanline, render=render)
 
         # 2. Post-render scanline (240)
         target = cycles_per_scanline

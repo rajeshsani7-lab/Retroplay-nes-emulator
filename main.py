@@ -85,9 +85,11 @@ P2_KEYMAP = {
 
 
 class NESEmulator:
-    def __init__(self, rom_path: str, scale: int = 3, debug: bool = False):
+    def __init__(self, rom_path: str, scale: int = 3, debug: bool = False, frameskip: int = 0):
         self.scale = scale
         self.debug = debug
+        self.frameskip = frameskip
+        self.frame_count = 0
         self.paused = False
         self.running = True
         self.fullscreen = False
@@ -142,40 +144,59 @@ class NESEmulator:
 
     # ─────────────────────────────────────────────────────────────────────────
     def run(self):
+        target_frame_time = 1.0 / NES_FPS
+        accumulator = 0.0
+        last_time = time.perf_counter()
+
         while self.running:
-            t_start = time.perf_counter()
+            now = time.perf_counter()
+            dt = now - last_time
+            last_time = now
+            if dt > 0.1:
+                dt = 0.1
+            accumulator += dt
 
             self._handle_events()
 
             if not self.paused:
-                self._emulate_frame()
-                self._render_frame()
-                self._play_audio()
+                frames_to_run = int(accumulator // target_frame_time)
+                if frames_to_run > 0:
+                    if frames_to_run > 3:
+                        frames_to_run = 3
+                        accumulator = 0.0
 
-            self.clock.tick(60)
+                    for i in range(frames_to_run):
+                        accumulator -= target_frame_time
+                        self.frame_count += 1
+                        if self.frameskip > 0:
+                            should_render = (self.frame_count % (self.frameskip + 1) == 0)
+                        else:
+                            should_render = (i == frames_to_run - 1)
+                        self.bus.step_frame(render=should_render)
 
-            if self.debug:
-                self._draw_debug()
+                    self._render_frame()
+                    self._play_audio()
 
-            pygame.display.flip()
+                    if self.debug:
+                        self._draw_debug()
+
+                    pygame.display.flip()
+
+            # Responsive timing yield
+            remaining = target_frame_time - (time.perf_counter() - now)
+            if remaining > 0.001:
+                time.sleep(remaining * 0.75)
 
     # ─────────────────────────────────────────────────────────────────────────
     def _emulate_frame(self):
         """Run one complete video frame with fast scanline rendering."""
-        self.bus.step_frame()
+        self.bus.step_frame(render=True)
 
     # ─────────────────────────────────────────────────────────────────────────
     def _render_frame(self):
         """Blit the PPU frame buffer onto the pygame window."""
-        frame = self.bus.ppu.frame   # numpy (240, 256, 3) uint8
-        pygame.surfarray.blit_array(
-            self.nes_surface,
-            frame.swapaxes(0, 1)     # pygame wants (W, H, 3)
-        )
-        scaled = pygame.transform.scale(
-            self.nes_surface,
-            (SCREEN_W * self.scale, SCREEN_H * self.scale)
-        )
+        surf = pygame.image.frombuffer(self.bus.ppu.frame.data, (SCREEN_W, SCREEN_H), 'RGB')
+        scaled = pygame.transform.scale_by(surf, self.scale)
         self.screen.blit(scaled, (0, 0))
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -324,6 +345,8 @@ def main():
     parser.add_argument("rom", nargs="?", help="Path to a .nes ROM file")
     parser.add_argument("--scale", type=int, default=3,
                         help="Screen scale factor (default: 3 → 768x720 window)")
+    parser.add_argument("--frameskip", type=int, default=0,
+                        help="Frame skip (0=dynamic auto, 1=render every 2nd frame for maximum speed)")
     parser.add_argument("--debug", action="store_true",
                         help="Show CPU/PPU debug overlay")
     args = parser.parse_args()
@@ -357,7 +380,7 @@ def main():
         print(f"ROM not found: {args.rom}")
         sys.exit(1)
 
-    emu = NESEmulator(args.rom, scale=args.scale, debug=args.debug)
+    emu = NESEmulator(args.rom, scale=args.scale, debug=args.debug, frameskip=args.frameskip)
     try:
         emu.run()
     finally:

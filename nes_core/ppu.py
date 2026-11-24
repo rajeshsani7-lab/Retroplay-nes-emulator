@@ -27,6 +27,34 @@ NES_PALETTE = [
     (160,214, 228), (160,162, 160), (0,   0,   0),  (0,   0,   0),
 ]
 
+# Precomputed Lookup Tables for instantaneous scanline unpacking
+BG_LOOKUP = [None] * (4 * 65536)
+for _pal in range(4):
+    _base_pal = _pal << 2
+    for _p0 in range(256):
+        for _p1 in range(256):
+            _b = bytearray(8)
+            for _i in range(8):
+                _bit = 7 - _i
+                _px = (((_p1 >> _bit) & 1) << 1) | ((_p0 >> _bit) & 1)
+                _b[_i] = (_base_pal | _px) if _px else 0
+            BG_LOOKUP[(_pal << 16) | (_p0 << 8) | _p1] = bytes(_b)
+
+SPRITE_LOOKUP = [None] * 65536
+SPRITE_LOOKUP_FLIP = [None] * 65536
+for _p0 in range(256):
+    for _p1 in range(256):
+        _b = bytearray(8)
+        _bf = bytearray(8)
+        for _i in range(8):
+            _bit = 7 - _i
+            _px = (((_p1 >> _bit) & 1) << 1) | ((_p0 >> _bit) & 1)
+            _b[_i] = _px
+            _bf[7 - _i] = _px
+        _key = (_p0 << 8) | _p1
+        SPRITE_LOOKUP[_key] = bytes(_b)
+        SPRITE_LOOKUP_FLIP[_key] = bytes(_bf)
+
 
 class PPU:
     SCREEN_W = 256
@@ -38,6 +66,8 @@ class PPU:
         # Internal memory
         self.vram   = bytearray(2048)   # Nametable RAM (2 KB, mirrored to 4)
         self.palette = bytearray(32)    # Palette RAM
+        self.pal_rgb_arr = np.zeros((32, 3), dtype=np.uint8)
+        self.pal_dirty = True
         self.oam    = bytearray(256)    # Object Attribute Memory (64 sprites)
         self.oam_addr = 0
 
@@ -117,10 +147,12 @@ class PPU:
             self.oam_addr = (self.oam_addr + 1) & 0xFF
         elif reg == 5:  # PPUSCROLL
             if self.w == 0:
+                self.scroll_x = data
                 self.x = data & 0x07
                 self.t = (self.t & 0xFFE0) | (data >> 3)
                 self.w = 1
             else:
+                self.scroll_y = data
                 self.t = (self.t & 0x8C1F) | ((data & 0xF8) << 2) | ((data & 0x07) << 12)
                 self.w = 0
         elif reg == 6:  # PPUADDR
@@ -166,6 +198,7 @@ class PPU:
             if addr in (0x10, 0x14, 0x18, 0x1C):
                 addr -= 0x10
             self.palette[addr] = data
+            self.pal_dirty = True
 
     def _mirror_nt(self, addr):
         """Apply nametable mirroring."""
@@ -186,21 +219,25 @@ class PPU:
         return r, g, b
 
     # -------------------------------------------------------------------------
-    # Fast Scanline Renderer (10-30x faster than dot-by-dot simulation)
+    # Fast Scanline Renderer (Vectorized & Precomputed LUT)
     # -------------------------------------------------------------------------
-    def render_scanline(self, scanline):
+    def render_scanline(self, scanline, render=True):
         if scanline < 0 or scanline >= 240:
             return
+
+        if not render:
+            # If skipping display, only evaluate Sprite 0 hit if it hasn't fired yet
+            if (self.status & 0x40) or not (self.mask & 0x18):
+                return
+            sy = self.oam[0] + 1
+            sp_size = 16 if (self.ctrl & 0x20) else 8
+            if not (0 <= scanline - sy < sp_size):
+                return
 
         show_bg = bool(self.mask & 0x08)
         show_sp = bool(self.mask & 0x10)
 
-        # Pre-resolve active 32 palette colors
-        pal_rgb = [NES_PALETTE[self.palette[i] & 0x3F] for i in range(32)]
-        bg_col = pal_rgb[0]
-
-        bg_pixel_line = bytearray(256)
-        bg_pal_line = bytearray(256)
+        line_buf = bytearray(256)
 
         # 1. Background
         if show_bg:
@@ -218,6 +255,7 @@ class PPU:
             vram = self.vram
             mirror = self.bus.cart.mirroring
             chr_rom = self.bus.cart.chr_rom
+            chr_len = len(chr_rom)
 
             for tile_col in range(33):
                 cur_x = total_base_x + tile_col * 8
@@ -225,10 +263,7 @@ class PPU:
                 coarse_x = (cur_x % 256) // 8
 
                 nt_id = (nt_y << 1) | nt_x
-                if mirror == 'horizontal':
-                    table_idx = (nt_id >> 1) & 1
-                else:  # vertical
-                    table_idx = nt_id & 1
+                table_idx = (nt_id >> 1) & 1 if mirror == 'horizontal' else (nt_id & 1)
                 vram_base = table_idx * 1024
 
                 tile_id = vram[vram_base + coarse_y * 32 + coarse_x]
@@ -237,27 +272,36 @@ class PPU:
                 pal_idx = (attr_byte >> shift) & 3
 
                 p_addr = (bg_table << 12) | (tile_id << 4) | fine_y
-                p0 = chr_rom[p_addr] if p_addr < len(chr_rom) else 0
-                p1 = chr_rom[p_addr + 8] if (p_addr + 8) < len(chr_rom) else 0
+                if p_addr + 8 < chr_len:
+                    p0 = chr_rom[p_addr]
+                    p1 = chr_rom[p_addr + 8]
+                else:
+                    p0 = chr_rom[p_addr] if p_addr < chr_len else 0
+                    p1 = chr_rom[p_addr + 8] if (p_addr + 8) < chr_len else 0
+
+                key = (pal_idx << 16) | (p0 << 8) | p1
+                pixels = BG_LOOKUP[key]
 
                 sx_start = tile_col * 8 - fine_x
-                for px in range(8):
-                    sx = sx_start + px
-                    if 0 <= sx < 256:
-                        bit = 7 - px
-                        pixel = (((p1 >> bit) & 1) << 1) | ((p0 >> bit) & 1)
-                        bg_pixel_line[sx] = pixel
-                        bg_pal_line[sx] = pal_idx
+                if 0 <= sx_start <= 248:
+                    line_buf[sx_start:sx_start + 8] = pixels
+                else:
+                    s_in = max(0, -sx_start)
+                    e_in = min(8, 256 - sx_start)
+                    if s_in < e_in:
+                        d_start = max(0, sx_start)
+                        line_buf[d_start:d_start + (e_in - s_in)] = pixels[s_in:e_in]
+
+            # PPUMASK left 8 pixels clipping
+            if not (self.mask & 0x02):
+                line_buf[0:8] = b'\x00' * 8
 
         # 2. Sprites & Sprite 0 hit
-        sp_pixel_line = bytearray(256)
-        sp_pal_line = bytearray(256)
-        sp_prio_line = bytearray(256)
-        sp0_line = bytearray(256)
-
         if show_sp:
             sprite_size = 16 if (self.ctrl & 0x20) else 8
             chr_rom = self.bus.cart.chr_rom
+            chr_len = len(chr_rom)
+            sp_clip_left = not (self.mask & 0x04)
 
             # Evaluate OAM backwards (lowest index sprite wins priority)
             for i in range(63, -1, -1):
@@ -271,7 +315,7 @@ class PPU:
                     flip_v = bool(attr & 0x80)
                     flip_h = bool(attr & 0x40)
                     priority = bool(attr & 0x20)
-                    pal_idx = (attr & 3) + 4
+                    pal_base = ((attr & 3) + 4) << 2
 
                     row = sprite_size - 1 - diff if flip_v else diff
                     if sprite_size == 8:
@@ -285,41 +329,35 @@ class PPU:
                             row -= 8
                         addr = (table << 12) | (t_id << 4) | row
 
-                    p0 = chr_rom[addr] if addr < len(chr_rom) else 0
-                    p1 = chr_rom[addr + 8] if (addr + 8) < len(chr_rom) else 0
+                    if addr + 8 < chr_len:
+                        p0 = chr_rom[addr]
+                        p1 = chr_rom[addr + 8]
+                    else:
+                        p0 = chr_rom[addr] if addr < chr_len else 0
+                        p1 = chr_rom[addr + 8] if (addr + 8) < chr_len else 0
+
+                    key = (p0 << 8) | p1
+                    pixels = SPRITE_LOOKUP_FLIP[key] if flip_h else SPRITE_LOOKUP[key]
 
                     for px in range(8):
-                        col_x = sx + (7 - px if flip_h else px)
+                        col_x = sx + px
                         if 0 <= col_x < 256:
-                            bit = 7 - px
-                            pixel = (((p1 >> bit) & 1) << 1) | ((p0 >> bit) & 1)
-                            if pixel != 0:
-                                sp_pixel_line[col_x] = pixel
-                                sp_pal_line[col_x] = pal_idx
-                                sp_prio_line[col_x] = 1 if priority else 0
-                                if i == 0:
-                                    sp0_line[col_x] = 1
+                            if sp_clip_left and col_x < 8:
+                                continue
+                            p_val = pixels[px]
+                            if p_val != 0:
+                                bg_val = line_buf[col_x]
+                                if i == 0 and bg_val != 0 and col_x < 255:
+                                    self.status |= 0x40  # Sprite 0 hit!
+                                if render and (not priority or bg_val == 0):
+                                    line_buf[col_x] = pal_base | p_val
 
         # 3. Composite line into RGB frame buffer
-        frame_line = self.frame[scanline]
-        for x in range(256):
-            bg_p = bg_pixel_line[x]
-            sp_p = sp_pixel_line[x]
-
-            if sp0_line[x] and bg_p != 0 and x < 255:
-                self.status |= 0x40  # Sprite 0 hit!
-
-            if bg_p == 0 and sp_p == 0:
-                frame_line[x] = bg_col
-            elif bg_p == 0:
-                frame_line[x] = pal_rgb[(sp_pal_line[x] << 2) | sp_p]
-            elif sp_p == 0:
-                frame_line[x] = pal_rgb[(bg_pal_line[x] << 2) | bg_p]
-            else:
-                if sp_prio_line[x] == 0:
-                    frame_line[x] = pal_rgb[(sp_pal_line[x] << 2) | sp_p]
-                else:
-                    frame_line[x] = pal_rgb[(bg_pal_line[x] << 2) | bg_p]
+        if render:
+            if self.pal_dirty:
+                self.pal_rgb_arr[:] = [NES_PALETTE[self.palette[i] & 0x3F] for i in range(32)]
+                self.pal_dirty = False
+            self.frame[scanline] = self.pal_rgb_arr[np.frombuffer(line_buf, dtype=np.uint8)]
 
     # -------------------------------------------------------------------------
     # Clock — called once per PPU cycle

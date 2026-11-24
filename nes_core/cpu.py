@@ -16,6 +16,8 @@ class CPU:
 
     def __init__(self, bus):
         self.bus = bus
+        self.ram = bus.ram
+        self.cart_read = bus.cart.mapper.cpu_read
 
         # Registers
         self.a = 0x00       # Accumulator
@@ -32,6 +34,8 @@ class CPU:
 
         # Build instruction table
         self._build_opcode_table()
+        # Fast 256-element list lookup instead of dict
+        self.opcodes_list = [self.opcodes.get(op, (self.NOP, self._imp, 2)) for op in range(256)]
 
     # -------------------------------------------------------------------------
     # Flag helpers
@@ -46,18 +50,28 @@ class CPU:
             self.status &= ~(1 << bit)
 
     def set_nz(self, value):
-        """Set Negative and Zero flags based on value."""
-        self.set_flag(self.FLAG_Z, (value & 0xFF) == 0)
-        self.set_flag(self.FLAG_N, (value >> 7) & 1)
+        """Set Negative and Zero flags directly without function call overhead."""
+        v = value & 0xFF
+        self.status = (self.status & 0x7D) | (0x02 if v == 0 else 0) | (v & 0x80)
 
     # -------------------------------------------------------------------------
-    # Bus access
+    # Bus access (fast path for zero-page / RAM)
     # -------------------------------------------------------------------------
     def read(self, addr):
-        return self.bus.cpu_read(addr & 0xFFFF)
+        addr &= 0xFFFF
+        if addr >= 0x8000:
+            return self.cart_read(addr)
+        if addr < 0x2000:
+            return self.ram[addr & 0x07FF]
+        return self.bus.cpu_read(addr)
 
     def write(self, addr, data):
-        self.bus.cpu_write(addr & 0xFFFF, data & 0xFF)
+        addr &= 0xFFFF
+        data &= 0xFF
+        if addr < 0x2000:
+            self.ram[addr & 0x07FF] = data
+            return
+        self.bus.cpu_write(addr, data)
 
     # -------------------------------------------------------------------------
     # Stack helpers
@@ -110,23 +124,21 @@ class CPU:
         if self.nmi_pending:
             self.nmi_pending = False
             self.push16(self.pc)
-            self.set_flag(self.FLAG_B, 0)
-            self.set_flag(self.FLAG_U, 1)
-            self.set_flag(self.FLAG_I, 1)
+            self.status = (self.status & ~0x10) | 0x20
             self.push(self.status)
+            self.status |= 0x04  # FLAG_I = 1
             lo = self.read(0xFFFA)
             hi = self.read(0xFFFB)
             self.pc = (hi << 8) | lo
             self.total_cycles += 7
             return 7
 
-        if self.irq_pending and self.get_flag(self.FLAG_I) == 0:
+        if self.irq_pending and not (self.status & 0x04):
             self.irq_pending = False
             self.push16(self.pc)
-            self.set_flag(self.FLAG_B, 0)
-            self.set_flag(self.FLAG_U, 1)
-            self.set_flag(self.FLAG_I, 1)
+            self.status = (self.status & ~0x10) | 0x20
             self.push(self.status)
+            self.status |= 0x04  # FLAG_I = 1
             lo = self.read(0xFFFE)
             hi = self.read(0xFFFF)
             self.pc = (hi << 8) | lo
@@ -135,18 +147,13 @@ class CPU:
 
         opcode = self.read(self.pc)
         self.pc = (self.pc + 1) & 0xFFFF
-        self.set_flag(self.FLAG_U, 1)
 
-        entry = self.opcodes.get(opcode)
-        if entry is None:
-            cycles = 2
-        else:
-            fn, addr_mode, base_cycles = entry
-            addr, page_crossed = addr_mode()
-            extra = fn(addr, page_crossed)
-            cycles = base_cycles + (1 if extra else 0)
+        fn, addr_mode, base_cycles = self.opcodes_list[opcode]
+        addr, page_crossed = addr_mode()
+        extra = fn(addr, page_crossed)
+        cycles = base_cycles + (1 if extra else 0)
 
-        self.set_flag(self.FLAG_U, 1)
+        self.status |= 0x20  # FLAG_U = 1
         self.total_cycles += cycles
         return cycles
 

@@ -7,30 +7,36 @@ echo   RetroPlay NES Emulator - Launcher
 echo =============================================
 echo.
 
-REM Try Python 3.12 first (most common system default)
+REM 1. Try Python 3.12 direct executable in AppData
+if exist "%LOCALAPPDATA%\Programs\Python\Python312\python.exe" (
+    set "PYCMD=%LOCALAPPDATA%\Programs\Python\Python312\python.exe"
+    goto :found
+)
+
+REM 2. Try Python 3.12 via py launcher
 py -3.12 -c "import numpy, pygame" >nul 2>&1
 if %errorlevel%==0 (
-    set PYVER=-3.12
+    set "PYCMD=py -3.12"
     goto :found
 )
 
-REM Try Python 3.14
-py -3.14 -c "import numpy, pygame" >nul 2>&1
+REM 3. Try standard python in PATH
+python -c "import numpy, pygame" >nul 2>&1
 if %errorlevel%==0 (
-    set PYVER=-3.14
+    set "PYCMD=python"
     goto :found
 )
 
-REM Try default py
+REM 4. Try default py launcher
 py -c "import numpy, pygame" >nul 2>&1
 if %errorlevel%==0 (
-    set PYVER=
+    set "PYCMD=py"
     goto :found
 )
 
-echo ERROR: numpy or pygame-ce not found.
-echo Please run this command first:
-echo   py -m pip install numpy pygame-ce
+echo ERROR: Python with numpy or pygame-ce was not found.
+echo Please run:
+echo   py -3.12 -m pip install numpy pygame-ce
 echo.
 pause
 exit /b 1
@@ -38,14 +44,14 @@ exit /b 1
 :found
 REM Check if a ROM was passed as argument
 if not "%~1"=="" (
-    py %PYVER% main.py "%~1" --scale 3
+    %PYCMD% main.py "%~1" --scale 3
     goto :end
 )
 
 REM Otherwise show ROM picker
 echo ROMs available in .\roms\
 echo.
-py %PYVER% main.py --scale 3
+%PYCMD% main.py --scale 3
 
 :end
 pause
