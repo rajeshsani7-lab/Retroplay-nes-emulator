@@ -65,7 +65,7 @@ class PPU:
 
         # Internal memory
         self.vram   = bytearray(2048)   # Nametable RAM (2 KB, mirrored to 4)
-        self.palette = bytearray(32)    # Palette RAM
+        self.palette = bytearray([0x0F] * 32)  # Palette RAM (default black backdrop)
         self.pal_rgb_arr = np.zeros((32, 3), dtype=np.uint8)
         self.pal_dirty = True
         self.oam    = bytearray(256)    # Object Attribute Memory (64 sprites)

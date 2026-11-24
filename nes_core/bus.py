@@ -193,7 +193,9 @@ class Bus:
     # Reset
     # -------------------------------------------------------------------------
     def reset(self):
-        self.ram       = bytearray(2048)
+        self.ram[:] = b'\x00' * 2048
+        self.ppu.palette[:] = b'\x0F' * 32
+        self.ppu.pal_dirty = True
         self.system_clock = 0
         self.dma_active   = False
         self.cpu.reset()

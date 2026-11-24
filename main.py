@@ -62,25 +62,35 @@ WINDOW_TITLE = "RetroPlay NES Emulator"
 # Bit 7=A, 6=B, 5=Select, 4=Start, 3=Up, 2=Down, 1=Left, 0=Right
 
 P1_KEYMAP = {
-    pygame.K_z:      7,   # A
-    pygame.K_x:      6,   # B
-    pygame.K_RSHIFT: 5,   # Select
-    pygame.K_RETURN: 4,   # Start
-    pygame.K_UP:     3,   # Up
-    pygame.K_DOWN:   2,   # Down
-    pygame.K_LEFT:   1,   # Left
-    pygame.K_RIGHT:  0,   # Right
+    # Action buttons
+    pygame.K_z:        [7],       # A
+    pygame.K_j:        [7],       # A
+    pygame.K_x:        [6],       # B
+    pygame.K_k:        [6],       # B
+    # Menu & Select buttons
+    pygame.K_RSHIFT:   [5],       # Select
+    pygame.K_LSHIFT:   [5],       # Select
+    pygame.K_SPACE:    [5],       # Select
+    pygame.K_TAB:      [5],       # Select
+    # Start
+    pygame.K_RETURN:   [4],       # Start
+    pygame.K_KP_ENTER: [4],       # Start
+    # D-Pad (Down triggers both Down and Select so multicart menus advance on Down arrow)
+    pygame.K_UP:       [3],       # Up
+    pygame.K_DOWN:     [2, 5],    # Down + Select
+    pygame.K_LEFT:     [1],       # Left
+    pygame.K_RIGHT:    [0],       # Right
 }
 
 P2_KEYMAP = {
-    pygame.K_COMMA:  7,   # A
-    pygame.K_PERIOD: 6,   # B
-    pygame.K_2:      5,   # Select
-    pygame.K_1:      4,   # Start
-    pygame.K_w:      3,   # Up
-    pygame.K_s:      2,   # Down
-    pygame.K_a:      1,   # Left
-    pygame.K_d:      0,   # Right
+    pygame.K_COMMA:    [7],       # A
+    pygame.K_PERIOD:   [6],       # B
+    pygame.K_2:        [5],       # Select
+    pygame.K_1:        [4],       # Start
+    pygame.K_w:        [3],       # Up
+    pygame.K_s:        [2, 5],    # Down + Select
+    pygame.K_a:        [1],       # Left
+    pygame.K_d:        [0],       # Right
 }
 
 
@@ -140,7 +150,7 @@ class NESEmulator:
         self.cycle_budget = 0.0
 
         print("[Emulator] Ready! Press F5 to reset, ESC to quit.")
-        print("[Controls] Z=A  X=B  Enter=Start  RShift=Select  Arrows=D-Pad")
+        print("[Controls] Arrows=Navigate/D-Pad  Enter=Start  Space/Shift/Tab=Select  Z/J=A  X/K=B")
 
     # ─────────────────────────────────────────────────────────────────────────
     def run(self):
@@ -251,15 +261,19 @@ class NESEmulator:
             self._toggle_fullscreen()
         # Controller buttons
         elif key in P1_KEYMAP:
-            self.bus.controller1 |= (1 << P1_KEYMAP[key])
+            for b in P1_KEYMAP[key]:
+                self.bus.controller1 |= (1 << b)
         elif key in P2_KEYMAP:
-            self.bus.controller2 |= (1 << P2_KEYMAP[key])
+            for b in P2_KEYMAP[key]:
+                self.bus.controller2 |= (1 << b)
 
     def _on_key_up(self, key):
         if key in P1_KEYMAP:
-            self.bus.controller1 &= ~(1 << P1_KEYMAP[key])
+            for b in P1_KEYMAP[key]:
+                self.bus.controller1 &= ~(1 << b)
         elif key in P2_KEYMAP:
-            self.bus.controller2 &= ~(1 << P2_KEYMAP[key])
+            for b in P2_KEYMAP[key]:
+                self.bus.controller2 &= ~(1 << b)
 
     # ─────────────────────────────────────────────────────────────────────────
     def _toggle_fullscreen(self):
