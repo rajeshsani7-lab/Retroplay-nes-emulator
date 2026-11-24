@@ -288,43 +288,56 @@ class Mapper3:
 
 
 # =============================================================================
-# Mapper 227 — 1200-in-1 / 57-in-1 Multicart
-# Used by: 1200-in-1 (J), 57-in-1 and similar multicarts
-#
-# Register at $8000-$FFFF controls banking:
-#   Bits: [A7-A6] = outer bank (selects 128K block)
-#         [A5]    = mode (0=NROM-128, 1=NROM-256)
-#         [A4-A1] = inner bank select
-#         [A0]    = mirroring (0=V, 1=H)
+# Mapper 227 — 1200-in-1 / 57-in-1 Multicart (Address Latch)
 # =============================================================================
 @register_mapper(227)
 class Mapper227:
     def __init__(self, cart):
         self.cart = cart
-        self.prg_bank_lo   = 0   # $8000-$BFFF
-        self.prg_bank_hi   = 0   # $C000-$FFFF
-        self._mirroring    = 'vertical'
+        self.prg_bank_lo = 0
+        self.prg_bank_hi = 0
+        self._mirroring = 'vertical'
+        self.chr_writable = True
+        self.sync(0)
+
+    def sync(self, latche):
+        S = latche & 1
+        p = ((latche >> 2) & 0x1F) + ((latche & 0x100) >> 3)
+        L = (latche >> 9) & 1
+
+        # CHR-RAM write protect when bit 7 is set
+        self.chr_writable = not bool((latche & 0x80) == 0x80)
+
+        if (latche >> 7) & 1:
+            if S:
+                bank = (p >> 1) * 2
+                self.prg_bank_lo = bank
+                self.prg_bank_hi = bank + 1
+            else:
+                self.prg_bank_lo = p
+                self.prg_bank_hi = p
+        else:
+            if S:
+                if L:
+                    self.prg_bank_lo = p & 0x3E
+                    self.prg_bank_hi = p | 7
+                else:
+                    self.prg_bank_lo = p & 0x3E
+                    self.prg_bank_hi = p & 0x38
+            else:
+                if L:
+                    self.prg_bank_lo = p
+                    self.prg_bank_hi = p | 7
+                else:
+                    self.prg_bank_lo = p
+                    self.prg_bank_hi = p & 0x38
+
+        m = ((latche >> 1) & 1) ^ 1
+        self._mirroring = 'vertical' if m else 'horizontal'
 
     def cpu_write(self, addr, data):
         if addr >= 0x8000:
-            outer  = (addr >> 6) & 0x03   # bits A7-A6
-            inner  = (addr >> 1) & 0x0F   # bits A4-A1
-            mode   = (addr >> 5) & 0x01   # bit  A5
-            mirror = addr & 0x01           # bit  A0
-
-            self._mirroring = 'horizontal' if mirror else 'vertical'
-            bank = (outer << 4) | inner
-
-            # When bit 12 is set (e.g., $9018 during menu loader), bank 0 is fixed at $C000-$FFFF
-            if (addr >> 12) & 1:
-                self.prg_bank_lo = bank
-                self.prg_bank_hi = 0
-            elif mode == 0:
-                self.prg_bank_lo = bank
-                self.prg_bank_hi = bank
-            else:
-                self.prg_bank_lo = bank & ~1
-                self.prg_bank_hi = bank | 1
+            self.sync(addr)
 
     def cpu_read(self, addr):
         prg_len = len(self.cart.prg_rom)
@@ -339,13 +352,12 @@ class Mapper227:
         return 0
 
     def ppu_read(self, addr):
-        # CHR-RAM only (8 KB)
         if addr < 0x2000:
             return self.cart.chr_rom[addr % len(self.cart.chr_rom)]
         return 0
 
     def ppu_write(self, addr, data):
-        if addr < 0x2000:
+        if addr < 0x2000 and self.chr_writable:
             self.cart.chr_rom[addr % len(self.cart.chr_rom)] = data
 
     def get_mirroring(self):

@@ -172,10 +172,10 @@ class PPU:
         addr = (addr - 0x2000) & 0x0FFF
         mirror = self.bus.cart.mirroring
         if mirror == 'horizontal':
-            table = (addr >> 10) & 0x01
+            table = (addr >> 11) & 0x01
             return table * 1024 + (addr & 0x03FF)
         elif mirror == 'vertical':
-            table = (addr >> 11) & 0x01
+            table = (addr >> 10) & 0x01
             return table * 1024 + (addr & 0x03FF)
         else:  # four-screen / single
             return addr & 0x07FF
