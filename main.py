@@ -99,10 +99,13 @@ class NESEmulator:
         self.bus = Bus(cart)
         self.bus.reset()
 
-        # Init pygame
+        # Init pygame mixer before pygame.init()
+        try:
+            pygame.mixer.pre_init(frequency=44100, size=-16, channels=2, buffer=512)
+            pygame.mixer.init()
+        except Exception:
+            pass
         pygame.init()
-        pygame.mixer.pre_init(frequency=44100, size=-16, channels=1, buffer=512)
-        pygame.mixer.init()
 
         self.win_w = SCREEN_W * scale
         self.win_h = SCREEN_H * scale + (40 if debug else 0)
@@ -117,9 +120,9 @@ class NESEmulator:
 
         # Audio
         self.audio_buffer = np.array([], dtype=np.float32)
-        self.audio_channel = pygame.sndarray.make_sound(
-            np.zeros(512, dtype=np.int16)
-        ) if pygame.mixer.get_init() else None
+        mixer_info = pygame.mixer.get_init()
+        self.audio_channels = mixer_info[2] if mixer_info else 0
+        self.audio_channel = None
 
         # Save state directory
         self.save_dir = os.path.join(os.path.dirname(rom_path), "saves")
@@ -188,8 +191,17 @@ class NESEmulator:
             arr = np.clip(arr, -1.0, 1.0)
             int_arr = (arr * 32767).astype(np.int16)
             if len(int_arr) > 0 and pygame.mixer.get_busy() == 0:
-                sound = pygame.sndarray.make_sound(int_arr)
-                sound.play()
+                mixer_info = pygame.mixer.get_init()
+                channels = mixer_info[2] if mixer_info else 1
+                if channels == 2:
+                    audio_data = np.column_stack((int_arr, int_arr))
+                else:
+                    audio_data = int_arr
+                try:
+                    sound = pygame.sndarray.make_sound(audio_data)
+                    sound.play()
+                except Exception:
+                    pass
 
     # ─────────────────────────────────────────────────────────────────────────
     def _handle_events(self):
