@@ -94,9 +94,11 @@ class Bus:
     # Fast Frame Step (Scanline based - 10x-30x faster)
     # -------------------------------------------------------------------------
     def step_frame(self, render=True):
-        """Emulate one full video frame (262 scanlines) using fast scanline rendering."""
+        """Emulate one full video frame (262 scanlines) with VBlank spin-loop fast forwarding."""
         self.ppu.frame_complete = False
         cycles_per_scanline = 341.0 / 3.0   # ~113.667 CPU cycles
+        cpu = self.cpu
+        ppu = self.ppu
 
         # 1. Visible scanlines (0 to 239)
         for scanline in range(240):
@@ -106,8 +108,18 @@ class Bus:
                     self._handle_dma_fast()
                     target -= 513
                 else:
-                    target -= self.cpu.step()
-            self.ppu.render_scanline(scanline, render=render)
+                    # Detect idle VBlank wait loops:
+                    # e.g. LDA $2002; BPL -5 (0xAD 0x02 0x20 0x10 0xFB) or BIT $2002; BPL -5 (0x2C 0x02 0x20 0x10 0xFB)
+                    # Before scanline 241, VBlank flag (bit 7) is guaranteed to be 0, so loop cannot exit until VBlank.
+                    if not (ppu.status & 0x80):
+                        pc = cpu.pc
+                        op = cpu.read(pc)
+                        if op in (0xAD, 0x2C) and cpu.read(pc + 1) == 0x02 and cpu.read(pc + 2) == 0x20:
+                            if cpu.read(pc + 3) == 0x10 and cpu.read(pc + 4) == 0xFB:
+                                target = 0
+                                break
+                    target -= cpu.step()
+            ppu.render_scanline(scanline, render=render)
 
         # 2. Post-render scanline (240)
         target = cycles_per_scanline
@@ -116,13 +128,20 @@ class Bus:
                 self._handle_dma_fast()
                 target -= 513
             else:
-                target -= self.cpu.step()
+                if not (ppu.status & 0x80):
+                    pc = cpu.pc
+                    op = cpu.read(pc)
+                    if op in (0xAD, 0x2C) and cpu.read(pc + 1) == 0x02 and cpu.read(pc + 2) == 0x20:
+                        if cpu.read(pc + 3) == 0x10 and cpu.read(pc + 4) == 0xFB:
+                            target = 0
+                            break
+                target -= cpu.step()
 
         # 3. VBlank (scanline 241)
-        self.ppu.status |= 0x80
-        if self.ppu.ctrl & 0x80:
-            self.cpu.nmi()
-        self.ppu.frame_complete = True
+        ppu.status |= 0x80
+        if ppu.ctrl & 0x80:
+            cpu.nmi()
+        ppu.frame_complete = True
 
         vblank_cycles = cycles_per_scanline * 20
         while vblank_cycles > 0:
@@ -130,17 +149,17 @@ class Bus:
                 self._handle_dma_fast()
                 vblank_cycles -= 513
             else:
-                vblank_cycles -= self.cpu.step()
+                vblank_cycles -= cpu.step()
 
         # 4. Pre-render scanline (261)
-        self.ppu.status &= ~0xE0
+        ppu.status &= ~0xE0
         target = cycles_per_scanline
         while target > 0:
             if self.dma_active:
                 self._handle_dma_fast()
                 target -= 513
             else:
-                target -= self.cpu.step()
+                target -= cpu.step()
 
     def _handle_dma_fast(self):
         page = self.dma_page << 8

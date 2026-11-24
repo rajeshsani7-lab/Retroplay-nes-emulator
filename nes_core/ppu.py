@@ -250,6 +250,10 @@ class PPU:
             nt_y = total_y // 240
             fine_y = total_y % 8
             coarse_y = (total_y % 240) // 8
+            coarse_y_32 = coarse_y * 32
+            attr_row = 960 + (coarse_y // 4) * 8
+            shift_y = (coarse_y & 2) << 1
+            bg_base_addr = (bg_table << 12) | fine_y
 
             total_base_x = base_nt_x * 256 + self.scroll_x
             vram = self.vram
@@ -266,12 +270,11 @@ class PPU:
                 table_idx = (nt_id >> 1) & 1 if mirror == 'horizontal' else (nt_id & 1)
                 vram_base = table_idx * 1024
 
-                tile_id = vram[vram_base + coarse_y * 32 + coarse_x]
-                attr_byte = vram[vram_base + 960 + (coarse_y // 4) * 8 + (coarse_x // 4)]
-                shift = ((coarse_y & 2) << 1) | (coarse_x & 2)
-                pal_idx = (attr_byte >> shift) & 3
+                tile_id = vram[vram_base + coarse_y_32 + coarse_x]
+                attr_byte = vram[vram_base + attr_row + (coarse_x // 4)]
+                pal_idx = (attr_byte >> (shift_y | (coarse_x & 2))) & 3
 
-                p_addr = (bg_table << 12) | (tile_id << 4) | fine_y
+                p_addr = bg_base_addr | (tile_id << 4)
                 if p_addr + 8 < chr_len:
                     p0 = chr_rom[p_addr]
                     p1 = chr_rom[p_addr + 8]

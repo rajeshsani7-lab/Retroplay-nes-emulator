@@ -104,6 +104,7 @@ class NESEmulator:
 
         # Audio Channel setup for smooth continuous playback
         self.audio_channel = None
+        self.audio_queue = []
         if pygame.mixer.get_init():
             try:
                 self.audio_channel = pygame.mixer.Channel(0)
@@ -129,7 +130,7 @@ class NESEmulator:
     # ─────────────────────────────────────────────────────────────────────────
     def run(self):
         target_frame_time = 1.0 / NES_FPS
-        accumulator = 0.0
+        lag = 0.0
         last_time = time.perf_counter()
 
         while self.running:
@@ -138,39 +139,31 @@ class NESEmulator:
             last_time = now
             if dt > 0.1:
                 dt = 0.1
-            accumulator += dt
+            lag += dt
 
             self._handle_events()
             self._update_controller_state()
 
             if not self.paused:
-                frames_to_run = int(accumulator // target_frame_time)
-                if frames_to_run > 0:
-                    if frames_to_run > 3:
-                        frames_to_run = 3
-                        accumulator = 0.0
-
-                    for i in range(frames_to_run):
-                        accumulator -= target_frame_time
-                        self.frame_count += 1
-                        if self.frameskip > 0:
-                            should_render = (self.frame_count % (self.frameskip + 1) == 0)
-                        else:
-                            should_render = (i == frames_to_run - 1)
-                        self.bus.step_frame(render=should_render)
-
-                    self._render_frame()
+                # If behind schedule, catch up with fast non-rendered frame steps (~1ms each)
+                # while always synthesizing audio so music stays glitch-free and in sync!
+                steps = 0
+                should_render = True
+                while lag >= target_frame_time and steps < 4:
+                    lag -= target_frame_time
+                    steps += 1
+                    should_render = (lag < target_frame_time or steps == 4)
+                    self.bus.step_frame(render=should_render)
                     self._play_audio()
 
+                if steps > 0 and should_render:
+                    self._render_frame()
                     if self.debug:
                         self._draw_debug()
-
                     pygame.display.flip()
 
-            # Responsive timing yield
-            remaining = target_frame_time - (time.perf_counter() - now)
-            if remaining > 0.001:
-                time.sleep(remaining * 0.75)
+            # Maintain silky-smooth 60 FPS timing
+            self.clock.tick(60)
 
     # ─────────────────────────────────────────────────────────────────────────
     def _update_controller_state(self):
@@ -238,21 +231,37 @@ class NESEmulator:
 
     # ─────────────────────────────────────────────────────────────────────────
     def _play_audio(self):
-        """Synthesize frame audio and stream seamlessly to pygame mixer."""
+        """Synthesize frame audio and stream seamlessly without dropout or delay."""
         if not pygame.mixer.get_init():
             return
         audio_data = self.bus.apu.generate_frame_audio(count=735)
         if audio_data is not None and len(audio_data) > 0:
             try:
                 sound = pygame.sndarray.make_sound(audio_data)
-                if self.audio_channel is None:
-                    self.audio_channel = pygame.mixer.Channel(0)
-                if not self.audio_channel.get_busy():
-                    self.audio_channel.play(sound)
-                elif self.audio_channel.get_queue() is None:
-                    self.audio_channel.queue(sound)
+                self.audio_queue.append(sound)
             except Exception:
                 pass
+
+        # Discard excessive backlog if paused or recovering from window freeze
+        while len(self.audio_queue) > 4:
+            self.audio_queue.pop(0)
+
+        if self.audio_channel is None:
+            try:
+                self.audio_channel = pygame.mixer.Channel(0)
+            except Exception:
+                return
+
+        try:
+            while self.audio_queue:
+                if not self.audio_channel.get_busy():
+                    self.audio_channel.play(self.audio_queue.pop(0))
+                elif self.audio_channel.get_queue() is None:
+                    self.audio_channel.queue(self.audio_queue.pop(0))
+                else:
+                    break
+        except Exception:
+            pass
 
     # ─────────────────────────────────────────────────────────────────────────
     def _handle_events(self):
