@@ -18,7 +18,7 @@ class LengthCounter:
 
     def __init__(self):
         self.counter  = 0
-        self.enabled  = False
+        self.enabled  = True
         self.halted   = False
 
     def clock(self):
@@ -280,6 +280,13 @@ class APU:
         self.sample_period = CPU_CLOCK / SAMPLE_RATE
         self.output_buffer = []
 
+        # Vectorized audio synthesizer state
+        self.p1_phase   = 0.0
+        self.p2_phase   = 0.0
+        self.tri_phase  = 0.0
+        self.noise_table = np.random.uniform(-1.0, 1.0, 32768).astype(np.float32)
+        self.noise_idx  = 0
+
     def write(self, addr, data):
         if addr == 0x4000: self.pulse1.write(0, data)
         elif addr == 0x4001: self.pulse1.write(1, data)
@@ -297,9 +304,13 @@ class APU:
         elif addr == 0x400F: self.noise.write(3, data)
         elif addr == 0x4015:
             self.pulse1.enabled   = bool(data & 0x01)
+            self.pulse1.length.enabled = self.pulse1.enabled
             self.pulse2.enabled   = bool(data & 0x02)
+            self.pulse2.length.enabled = self.pulse2.enabled
             self.triangle.enabled = bool(data & 0x04)
+            self.triangle.length.enabled = self.triangle.enabled
             self.noise.enabled    = bool(data & 0x08)
+            self.noise.length.enabled = self.noise.enabled
             if not self.pulse1.enabled:   self.pulse1.length.counter = 0
             if not self.pulse2.enabled:   self.pulse2.length.counter = 0
             if not self.triangle.enabled: self.triangle.length.counter = 0
@@ -387,3 +398,58 @@ class APU:
         buf = self.output_buffer[:]
         self.output_buffer.clear()
         return buf
+
+    def generate_frame_audio(self, count=735):
+        """Synthesize frame audio in one fast, vectorized pass."""
+        # Clock envelopes and length counters for frame
+        self._clock_quarter()
+        self._clock_half()
+
+        t_steps = np.arange(count, dtype=np.float32)
+        mixed = np.zeros(count, dtype=np.float32)
+
+        # Pulse 1
+        p1 = self.pulse1
+        if p1.enabled and p1.length.active() and p1.timer_period >= 8 and not p1.sweep.muted(p1.timer_period):
+            p1_vol = (p1.envelope.output() / 15.0) * 0.35
+            if p1_vol > 0:
+                p1_freq = CPU_CLOCK / (16.0 * (p1.timer_period + 1))
+                step = p1_freq / SAMPLE_RATE
+                phases = (self.p1_phase + t_steps * step) % 1.0
+                self.p1_phase = (self.p1_phase + count * step) % 1.0
+                duty_thresh = (0.125, 0.25, 0.5, 0.75)[p1.duty]
+                mixed += np.where(phases < duty_thresh, p1_vol, -p1_vol)
+
+        # Pulse 2
+        p2 = self.pulse2
+        if p2.enabled and p2.length.active() and p2.timer_period >= 8 and not p2.sweep.muted(p2.timer_period):
+            p2_vol = (p2.envelope.output() / 15.0) * 0.35
+            if p2_vol > 0:
+                p2_freq = CPU_CLOCK / (16.0 * (p2.timer_period + 1))
+                step = p2_freq / SAMPLE_RATE
+                phases = (self.p2_phase + t_steps * step) % 1.0
+                self.p2_phase = (self.p2_phase + count * step) % 1.0
+                duty_thresh = (0.125, 0.25, 0.5, 0.75)[p2.duty]
+                mixed += np.where(phases < duty_thresh, p2_vol, -p2_vol)
+
+        # Triangle
+        tri = self.triangle
+        if tri.enabled and tri.length.active() and tri.linear_counter > 0 and tri.timer_period >= 2:
+            tri_freq = CPU_CLOCK / (32.0 * (tri.timer_period + 1))
+            step = tri_freq / SAMPLE_RATE
+            phases = (self.tri_phase + t_steps * step) % 1.0
+            self.tri_phase = (self.tri_phase + count * step) % 1.0
+            tri_out = np.where(phases < 0.5, 4.0 * phases - 1.0, 3.0 - 4.0 * phases) * 0.35
+            mixed += tri_out
+
+        # Noise
+        noi = self.noise
+        if noi.enabled and noi.length.active():
+            noi_vol = (noi.envelope.output() / 15.0) * 0.2
+            if noi_vol > 0:
+                mixed += self.noise_table[self.noise_idx : self.noise_idx + count] * noi_vol
+                self.noise_idx = (self.noise_idx + count) % (len(self.noise_table) - count)
+
+        # Scale to 16-bit integer PCM and output stereo (count, 2)
+        int_arr = (np.clip(mixed, -1.0, 1.0) * 24000).astype(np.int16)
+        return np.column_stack((int_arr, int_arr))

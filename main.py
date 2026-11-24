@@ -1,18 +1,18 @@
 """
 NES Emulator — Main Entry Point
-Requires: pygame, numpy
+Requires: pygame-ce, numpy
 
 Usage:
   python main.py path/to/game.nes
+  python main.py path/to/game.nes --fullscreen
   python main.py path/to/game.nes --scale 3
-  python main.py path/to/game.nes --debug
 
 Controls (Player 1):
   Arrow Keys   → D-Pad
-  Z            → A button
-  X            → B button
+  Z / J        → A button (Jump)
+  X / K        → B button (Shoot / Attack)
   Enter        → Start
-  Right Shift  → Select
+  Space/Shift  → Select
 
 Controls (Player 2):
   WASD         → D-Pad
@@ -21,12 +21,13 @@ Controls (Player 2):
   1            → Start
   2            → Select
 
-Emulator Keys:
+Emulator Hotkeys:
+  F11          → Toggle Fullscreen / Windowed
+  F10          → Toggle Aspect Ratio (16:9 Widescreen vs 4:3 Pillarbox)
   ESC          → Quit
   F5           → Reset
   F7           → Save state
   F8           → Load state
-  F11          → Toggle fullscreen
   P            → Pause / Resume
 """
 
@@ -40,8 +41,9 @@ import numpy as np
 try:
     import pygame
     import pygame.mixer
+    import pygame.sndarray
 except ImportError:
-    print("ERROR: pygame not found. Install it with:  pip install pygame numpy")
+    print("ERROR: pygame not found. Please run via play.bat or install pygame-ce.")
     sys.exit(1)
 
 from nes_core.cartridge import Cartridge
@@ -58,51 +60,16 @@ SCREEN_H = 240
 WINDOW_TITLE = "RetroPlay NES Emulator"
 
 
-# ─── Controller bit mapping ───────────────────────────────────────────────────
-# Bit 7=A, 6=B, 5=Select, 4=Start, 3=Up, 2=Down, 1=Left, 0=Right
-
-P1_KEYMAP = {
-    # Action buttons
-    pygame.K_z:        [7],       # A
-    pygame.K_j:        [7],       # A
-    pygame.K_x:        [6],       # B
-    pygame.K_k:        [6],       # B
-    # Menu & Select buttons
-    pygame.K_RSHIFT:   [5],       # Select
-    pygame.K_LSHIFT:   [5],       # Select
-    pygame.K_SPACE:    [5],       # Select
-    pygame.K_TAB:      [5],       # Select
-    # Start
-    pygame.K_RETURN:   [4],       # Start
-    pygame.K_KP_ENTER: [4],       # Start
-    # D-Pad (Down triggers both Down and Select so multicart menus advance on Down arrow)
-    pygame.K_UP:       [3],       # Up
-    pygame.K_DOWN:     [2, 5],    # Down + Select
-    pygame.K_LEFT:     [1],       # Left
-    pygame.K_RIGHT:    [0],       # Right
-}
-
-P2_KEYMAP = {
-    pygame.K_COMMA:    [7],       # A
-    pygame.K_PERIOD:   [6],       # B
-    pygame.K_2:        [5],       # Select
-    pygame.K_1:        [4],       # Start
-    pygame.K_w:        [3],       # Up
-    pygame.K_s:        [2, 5],    # Down + Select
-    pygame.K_a:        [1],       # Left
-    pygame.K_d:        [0],       # Right
-}
-
-
 class NESEmulator:
-    def __init__(self, rom_path: str, scale: int = 3, debug: bool = False, frameskip: int = 0):
+    def __init__(self, rom_path: str, scale: int = 3, debug: bool = False, frameskip: int = 0, fullscreen: bool = False):
         self.scale = scale
         self.debug = debug
         self.frameskip = frameskip
         self.frame_count = 0
         self.paused = False
         self.running = True
-        self.fullscreen = False
+        self.fullscreen = fullscreen
+        self.aspect_16_9 = True  # Default to 16:9 widescreen in fullscreen
         self.save_slot = 0
 
         # Load ROM and build system
@@ -111,17 +78,22 @@ class NESEmulator:
         self.bus = Bus(cart)
         self.bus.reset()
 
-        # Init pygame mixer before pygame.init()
+        # Init pygame mixer with low-latency buffer before display init
         try:
-            pygame.mixer.pre_init(frequency=44100, size=-16, channels=2, buffer=512)
+            pygame.mixer.pre_init(frequency=44100, size=-16, channels=2, buffer=1024)
             pygame.mixer.init()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[Audio] Mixer init warning: {e}")
         pygame.init()
 
         self.win_w = SCREEN_W * scale
         self.win_h = SCREEN_H * scale + (40 if debug else 0)
-        self.screen = pygame.display.set_mode((self.win_w, self.win_h))
+
+        if self.fullscreen:
+            info = pygame.display.Info()
+            self.screen = pygame.display.set_mode((info.current_w, info.current_h), pygame.FULLSCREEN)
+        else:
+            self.screen = pygame.display.set_mode((self.win_w, self.win_h))
         pygame.display.set_caption(f"{WINDOW_TITLE} — {os.path.basename(rom_path)}")
 
         # NES frame surface (256x240)
@@ -130,11 +102,13 @@ class NESEmulator:
         # Font for debug overlay
         self.font = pygame.font.SysFont("Consolas", 11) if debug else None
 
-        # Audio
-        self.audio_buffer = np.array([], dtype=np.float32)
-        mixer_info = pygame.mixer.get_init()
-        self.audio_channels = mixer_info[2] if mixer_info else 0
+        # Audio Channel setup for smooth continuous playback
         self.audio_channel = None
+        if pygame.mixer.get_init():
+            try:
+                self.audio_channel = pygame.mixer.Channel(0)
+            except Exception:
+                self.audio_channel = None
 
         # Save state directory
         self.save_dir = os.path.join(os.path.dirname(rom_path), "saves")
@@ -149,8 +123,8 @@ class NESEmulator:
         self.frame_time = 1.0 / NES_FPS
         self.cycle_budget = 0.0
 
-        print("[Emulator] Ready! Press F5 to reset, ESC to quit.")
-        print("[Controls] Arrows=Navigate/D-Pad  Enter=Start  Space/Shift/Tab=Select  Z/J=A  X/K=B")
+        print("[Emulator] Ready! Press F11 for Fullscreen, F10 for 16:9 / 4:3 Toggle.")
+        print("[Controls] Arrows=D-Pad  Enter=Start  Space/Shift=Select  Z/J=A (Jump)  X/K=B (Shoot)")
 
     # ─────────────────────────────────────────────────────────────────────────
     def run(self):
@@ -167,6 +141,7 @@ class NESEmulator:
             accumulator += dt
 
             self._handle_events()
+            self._update_controller_state()
 
             if not self.paused:
                 frames_to_run = int(accumulator // target_frame_time)
@@ -198,82 +173,109 @@ class NESEmulator:
                 time.sleep(remaining * 0.75)
 
     # ─────────────────────────────────────────────────────────────────────────
-    def _emulate_frame(self):
-        """Run one complete video frame with fast scanline rendering."""
-        self.bus.step_frame(render=True)
+    def _update_controller_state(self):
+        """Active hardware keyboard polling for ultra-smooth, responsive controls."""
+        keys = pygame.key.get_pressed()
+
+        # Controller 1: Bit 7=A, 6=B, 5=Select, 4=Start, 3=Up, 2=Down, 1=Left, 0=Right
+        p1 = 0
+        if keys[pygame.K_RIGHT]: p1 |= (1 << 0)
+        if keys[pygame.K_LEFT]:  p1 |= (1 << 1)
+        if keys[pygame.K_DOWN]:  p1 |= (1 << 2)
+        if keys[pygame.K_UP]:    p1 |= (1 << 3)
+        if keys[pygame.K_RETURN] or keys[pygame.K_KP_ENTER]: p1 |= (1 << 4)
+        if keys[pygame.K_RSHIFT] or keys[pygame.K_LSHIFT] or keys[pygame.K_SPACE] or keys[pygame.K_TAB]:
+            p1 |= (1 << 5)
+        if keys[pygame.K_x] or keys[pygame.K_k]: p1 |= (1 << 6)  # B (Shoot)
+        if keys[pygame.K_z] or keys[pygame.K_j]: p1 |= (1 << 7)  # A (Jump)
+
+        # Smart Multicart Menu Navigation:
+        # On Mapper 227 multicart menu (e.g. 1200-in-1), Select advances cursor down.
+        # When RAM[0x38] == 0xFF, cart is on the menu screen, so pressing Down automatically sends Select.
+        # In actual gameplay (Contra, etc.), RAM[0x38] != 0xFF, so Down is purely duck/aim down!
+        if getattr(self.bus.cart, 'mapper_id', 0) == 227:
+            if self.bus.ram[0x38] == 0xFF and (keys[pygame.K_DOWN] or keys[pygame.K_s]):
+                p1 |= (1 << 5)
+
+        self.bus.controller1 = p1
+
+        # Controller 2
+        p2 = 0
+        if keys[pygame.K_d]: p2 |= (1 << 0)
+        if keys[pygame.K_a]: p2 |= (1 << 1)
+        if keys[pygame.K_s]: p2 |= (1 << 2)
+        if keys[pygame.K_w]: p2 |= (1 << 3)
+        if keys[pygame.K_1]: p2 |= (1 << 4)
+        if keys[pygame.K_2]: p2 |= (1 << 5)
+        if keys[pygame.K_PERIOD]: p2 |= (1 << 6)
+        if keys[pygame.K_COMMA]:  p2 |= (1 << 7)
+        self.bus.controller2 = p2
 
     # ─────────────────────────────────────────────────────────────────────────
     def _render_frame(self):
-        """Blit the PPU frame buffer onto the pygame window."""
+        """Blit the PPU frame buffer onto the pygame window (supporting 16:9 & 4:3)."""
         surf = pygame.image.frombuffer(self.bus.ppu.frame.data, (SCREEN_W, SCREEN_H), 'RGB')
-        scaled = pygame.transform.scale_by(surf, self.scale)
-        self.screen.blit(scaled, (0, 0))
+
+        if self.fullscreen:
+            win_w, win_h = self.screen.get_size()
+            if self.aspect_16_9:
+                # 16:9 Fullscreen Stretch (Edge-to-Edge)
+                scaled = pygame.transform.scale(surf, (win_w, win_h))
+                self.screen.blit(scaled, (0, 0))
+            else:
+                # 4:3 Classic Pillarbox
+                scale = min(win_w / SCREEN_W, win_h / SCREEN_H)
+                dest_w = int(SCREEN_W * scale)
+                dest_h = int(SCREEN_H * scale)
+                offset_x = (win_w - dest_w) // 2
+                offset_y = (win_h - dest_h) // 2
+                self.screen.fill((0, 0, 0))
+                scaled = pygame.transform.scale(surf, (dest_w, dest_h))
+                self.screen.blit(scaled, (offset_x, offset_y))
+        else:
+            scaled = pygame.transform.scale_by(surf, self.scale)
+            self.screen.blit(scaled, (0, 0))
 
     # ─────────────────────────────────────────────────────────────────────────
     def _play_audio(self):
-        """Convert APU samples to pygame audio and queue them."""
+        """Synthesize frame audio and stream seamlessly to pygame mixer."""
         if not pygame.mixer.get_init():
             return
-        samples = self.bus.apu.get_samples()
-        if samples:
-            arr = np.array(samples, dtype=np.float32)
-            arr = np.clip(arr, -1.0, 1.0)
-            int_arr = (arr * 32767).astype(np.int16)
-            if len(int_arr) > 0 and pygame.mixer.get_busy() == 0:
-                mixer_info = pygame.mixer.get_init()
-                channels = mixer_info[2] if mixer_info else 1
-                if channels == 2:
-                    audio_data = np.column_stack((int_arr, int_arr))
-                else:
-                    audio_data = int_arr
-                try:
-                    sound = pygame.sndarray.make_sound(audio_data)
-                    sound.play()
-                except Exception:
-                    pass
+        audio_data = self.bus.apu.generate_frame_audio(count=735)
+        if audio_data is not None and len(audio_data) > 0:
+            try:
+                sound = pygame.sndarray.make_sound(audio_data)
+                if self.audio_channel is None:
+                    self.audio_channel = pygame.mixer.Channel(0)
+                if not self.audio_channel.get_busy():
+                    self.audio_channel.play(sound)
+                elif self.audio_channel.get_queue() is None:
+                    self.audio_channel.queue(sound)
+            except Exception:
+                pass
 
     # ─────────────────────────────────────────────────────────────────────────
     def _handle_events(self):
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 self.running = False
-
             elif event.type == pygame.KEYDOWN:
-                self._on_key_down(event.key)
-
-            elif event.type == pygame.KEYUP:
-                self._on_key_up(event.key)
-
-    def _on_key_down(self, key):
-        if key == pygame.K_ESCAPE:
-            self.running = False
-        elif key == pygame.K_F5:
-            print("[Emulator] Reset")
-            self.bus.reset()
-        elif key == pygame.K_p:
-            self.paused = not self.paused
-            print(f"[Emulator] {'Paused' if self.paused else 'Resumed'}")
-        elif key == pygame.K_F7:
-            self._save_state()
-        elif key == pygame.K_F8:
-            self._load_state()
-        elif key == pygame.K_F11:
-            self._toggle_fullscreen()
-        # Controller buttons
-        elif key in P1_KEYMAP:
-            for b in P1_KEYMAP[key]:
-                self.bus.controller1 |= (1 << b)
-        elif key in P2_KEYMAP:
-            for b in P2_KEYMAP[key]:
-                self.bus.controller2 |= (1 << b)
-
-    def _on_key_up(self, key):
-        if key in P1_KEYMAP:
-            for b in P1_KEYMAP[key]:
-                self.bus.controller1 &= ~(1 << b)
-        elif key in P2_KEYMAP:
-            for b in P2_KEYMAP[key]:
-                self.bus.controller2 &= ~(1 << b)
+                if event.key == pygame.K_ESCAPE:
+                    self.running = False
+                elif event.key == pygame.K_F5:
+                    print("[Emulator] Reset")
+                    self.bus.reset()
+                elif event.key == pygame.K_p:
+                    self.paused = not self.paused
+                    print(f"[Emulator] {'Paused' if self.paused else 'Resumed'}")
+                elif event.key == pygame.K_F7:
+                    self._save_state()
+                elif event.key == pygame.K_F8:
+                    self._load_state()
+                elif event.key == pygame.K_F11:
+                    self._toggle_fullscreen()
+                elif event.key == pygame.K_F10:
+                    self._toggle_aspect()
 
     # ─────────────────────────────────────────────────────────────────────────
     def _toggle_fullscreen(self):
@@ -284,6 +286,13 @@ class NESEmulator:
                 (info.current_w, info.current_h), pygame.FULLSCREEN)
         else:
             self.screen = pygame.display.set_mode((self.win_w, self.win_h))
+        mode_str = "Fullscreen (16:9)" if (self.fullscreen and self.aspect_16_9) else ("Fullscreen (4:3)" if self.fullscreen else "Windowed")
+        print(f"[Display] {mode_str}")
+
+    def _toggle_aspect(self):
+        self.aspect_16_9 = not self.aspect_16_9
+        aspect_str = "16:9 Widescreen Stretch" if self.aspect_16_9 else "4:3 Classic Pillarbox"
+        print(f"[Display] Aspect ratio set to: {aspect_str}")
 
     # ─────────────────────────────────────────────────────────────────────────
     def _save_state(self):
@@ -359,6 +368,8 @@ def main():
     parser.add_argument("rom", nargs="?", help="Path to a .nes ROM file")
     parser.add_argument("--scale", type=int, default=3,
                         help="Screen scale factor (default: 3 → 768x720 window)")
+    parser.add_argument("--fullscreen", action="store_true",
+                        help="Start directly in 16:9 fullscreen mode")
     parser.add_argument("--frameskip", type=int, default=0,
                         help="Frame skip (0=dynamic auto, 1=render every 2nd frame for maximum speed)")
     parser.add_argument("--debug", action="store_true",
@@ -394,7 +405,7 @@ def main():
         print(f"ROM not found: {args.rom}")
         sys.exit(1)
 
-    emu = NESEmulator(args.rom, scale=args.scale, debug=args.debug, frameskip=args.frameskip)
+    emu = NESEmulator(args.rom, scale=args.scale, debug=args.debug, frameskip=args.frameskip, fullscreen=args.fullscreen)
     try:
         emu.run()
     finally:
@@ -403,3 +414,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

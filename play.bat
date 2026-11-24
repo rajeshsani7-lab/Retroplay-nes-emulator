@@ -48,10 +48,17 @@ if not "%~1"=="" (
     goto :end
 )
 
-REM Otherwise show ROM picker
-echo ROMs available in .\roms\
 echo.
-%PYCMD% main.py --scale 3
+echo Select Display Mode:
+echo   [1] 16:9 Widescreen Fullscreen (Recommended)
+echo   [2] Windowed Mode (Scale x3)
+echo.
+set /p MODE="Enter choice (1 or 2, default=1): "
+if "%MODE%"=="2" (
+    %PYCMD% main.py --scale 3
+) else (
+    %PYCMD% main.py --fullscreen
+)
 
 :end
 pause
