@@ -10,11 +10,11 @@ DEFAULT_SETTINGS = {
     "video": {
         "theme": "light",          # "light" = Retro Light, "dark" = Midnight Dark
         "fullscreen": False,
-        "aspect_mode": "16:9",     # "16:9", "4:3", "1:1"
+        "aspect_mode": "4:3",      # "4:3" (CRT), "1:1" (Pixel), "16:9" (Stretch)
         "scale": 3,                # 2, 3, 4
         "smooth_scaling": False,   # False = crisp nearest-neighbor, True = smooth bilinear
         "scanlines": 0,            # 0 = Off, 1 = Light, 2 = Classic
-        "overscan_crop": False,    # Crop 8px top/bottom TV overscan border
+        "overscan_crop": True,     # Crop 8px top/bottom TV overscan border
         "show_fps": True,
         "frameskip": 0,            # 0, 1, 2
     },
