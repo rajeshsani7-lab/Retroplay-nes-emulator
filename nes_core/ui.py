@@ -515,31 +515,46 @@ class EmulatorUI:
         surf.blit(lbl, (right_x - lbl.get_width(), y + 2))
 
     def _draw_cartridge_art(self, surf, rect: pygame.Rect, display: str, info: dict):
-        """Draw a styled NES cartridge preview card when no game screenshot is cached yet."""
+        """Draw a styled 1985 NES 72-pin cartridge preview card when no screenshot is cached yet."""
         t = self._theme()
-        pygame.draw.rect(surf, t["art_frame"], rect, border_radius=8)
-        pygame.draw.rect(surf, t["border"], rect, 1, border_radius=8)
+        pygame.draw.rect(surf, t["art_frame"], rect, border_radius=6)
 
-        cw, ch = 128, 128
+        cw, ch = 122, 118
         cx = rect.x + (rect.w - cw) // 2
         cy = rect.y + (rect.h - ch) // 2
-        # Classic gray NES cartridge silhouette
-        pygame.draw.rect(surf, t["cart_shell"], (cx, cy, cw, ch), border_radius=6)
-        pygame.draw.rect(surf, t["cart_groove"], (cx + 12, cy + 8, cw - 24, 14), border_radius=2)
-        for g in range(4):
-            pygame.draw.line(surf, t["cart_groove"], (cx + 16, cy + 28 + g * 5), (cx + cw - 16, cy + 28 + g * 5), 2)
+        # Classic gray NES cartridge silhouette with 3D plastic bevel & top notch
+        pygame.draw.rect(surf, (132, 136, 146), (cx + 2, cy + 2, cw, ch), border_radius=5)
+        pygame.draw.rect(surf, t["cart_shell"], (cx, cy, cw, ch), border_radius=5)
+        pygame.draw.rect(surf, t["cart_groove"], (cx + 14, cy + 7, cw - 28, 12), border_radius=2)
+        for g in range(5):
+            pygame.draw.line(surf, t["cart_groove"], (cx + 14, cy + 24 + g * 4), (cx + cw - 14, cy + 24 + g * 4), 2)
 
-        # Colored game label sticker
+        # Colored game label sticker + gold NES seal dot
         accent = t["mapper_colors"].get(info.get("mapper_id", 0), t["accent"])
-        lbl_rect = pygame.Rect(cx + 18, cy + 48, cw - 36, 72)
+        lbl_rect = pygame.Rect(cx + 16, cy + 48, cw - 32, 62)
         pygame.draw.rect(surf, (24, 27, 38), lbl_rect, border_radius=4)
-        pygame.draw.rect(surf, accent, (lbl_rect.x, lbl_rect.y, lbl_rect.w, 18), border_top_left_radius=4, border_top_right_radius=4)
+        pygame.draw.rect(surf, accent, (lbl_rect.x, lbl_rect.y, lbl_rect.w, 17), border_top_left_radius=4, border_top_right_radius=4)
         m_txt = self.font_badge.render(info.get("mapper_short", "NES"), True, (255, 255, 255))
-        surf.blit(m_txt, (lbl_rect.x + (lbl_rect.w - m_txt.get_width()) // 2, lbl_rect.y + 2))
+        surf.blit(m_txt, (lbl_rect.x + (lbl_rect.w - m_txt.get_width()) // 2, lbl_rect.y + 1))
 
-        short_name = display[:12]
+        short_name = display[:11]
         t_surf = self.font_badge.render(short_name, True, self.GOLD)
-        surf.blit(t_surf, (lbl_rect.x + (lbl_rect.w - t_surf.get_width()) // 2, lbl_rect.y + 34))
+        surf.blit(t_surf, (lbl_rect.x + (lbl_rect.w - t_surf.get_width()) // 2, lbl_rect.y + 27))
+        pygame.draw.circle(surf, self.GOLD, (lbl_rect.right - 9, lbl_rect.bottom - 9), 4)
+
+    def _draw_nes_pad_icon(self, surf, x: int, y: int):
+        """Draw a miniature 1985 NES controller icon."""
+        pygame.draw.rect(surf, (216, 212, 202), (x, y, 42, 20), border_radius=3)
+        pygame.draw.rect(surf, (40, 44, 56), (x + 3, y + 3, 36, 14), border_radius=2)
+        # Cross D-pad
+        pygame.draw.rect(surf, (210, 214, 222), (x + 8, y + 6, 3, 8))
+        pygame.draw.rect(surf, (210, 214, 222), (x + 6, y + 8, 7, 4))
+        # Select / Start center pills
+        pygame.draw.rect(surf, (140, 144, 154), (x + 17, y + 11, 4, 2))
+        pygame.draw.rect(surf, (140, 144, 154), (x + 22, y + 11, 4, 2))
+        # Red B & A buttons
+        pygame.draw.circle(surf, (218, 44, 54), (x + 30, y + 11), 2)
+        pygame.draw.circle(surf, (218, 44, 54), (x + 35, y + 11), 2)
 
     def _draw_backdrop(self, screen: pygame.Surface):
         t = self._theme()
@@ -558,16 +573,25 @@ class EmulatorUI:
     def _draw_header(self, screen: pygame.Surface, gamepads=None):
         t = self._theme()
         w, _ = screen.get_size()
-        pygame.draw.rect(screen, t["header_bg"], (0, 0, w, 62))
-        pygame.draw.line(screen, t["red_nes"], (0, 60), (w, 60), 2)
-        pygame.draw.line(screen, t["border"], (0, 62), (w, 62), 1)
+        pygame.draw.rect(screen, t["header_bg"], (0, 0, w, 64))
+        # Classic NES two-tone console stripe (charcoal + crimson)
+        pygame.draw.line(screen, (40, 44, 56), (0, 60), (w, 60), 2)
+        pygame.draw.line(screen, t["red_nes"], (0, 62), (w, 62), 3)
 
-        pygame.draw.rect(screen, t["red_nes"], (24, 18, 46, 26), border_radius=6)
+        # Mini NES controller + NES badge + brand
+        self._draw_nes_pad_icon(screen, 22, 20)
+        pygame.draw.rect(screen, t["red_nes"], (72, 18, 44, 24), border_radius=5)
         nes_lbl = self.font_badge.render("NES", True, (255, 255, 255))
-        screen.blit(nes_lbl, (24 + (46 - nes_lbl.get_width()) // 2, 24))
+        screen.blit(nes_lbl, (72 + (44 - nes_lbl.get_width()) // 2, 23))
 
         brand = self.font_brand.render("RETROPLAY", True, t["text"])
-        screen.blit(brand, (82, 14))
+        screen.blit(brand, (126, 13))
+
+        # Subtle console cooling vent grooves
+        vx = 286
+        if w > 980:
+            for i in range(4):
+                pygame.draw.rect(screen, t["border"], (vx + i * 7, 22, 3, 16), border_radius=1)
 
         has_gp = bool(gamepads and gamepads.devices)
         gp_txt = f"Gamepad: {gamepads.devices[0]['name'][:22]}" if has_gp else "Keyboard Ready"
@@ -575,21 +599,24 @@ class EmulatorUI:
         pill_bg = t["green_bg"] if has_gp else t["card_inner"]
         pill_w = max(160, len(gp_txt) * 8 + 26)
         px = w - pill_w - 224
-        if px > 240:
-            pygame.draw.rect(screen, pill_bg, (px, 17, pill_w, 28), border_radius=14)
-            pygame.draw.circle(screen, gp_col, (px + 14, 31), 4)
-            screen.blit(self.font_badge.render(gp_txt, True, gp_col), (px + 24, 24))
+        if px > 320:
+            pygame.draw.rect(screen, pill_bg, (px, 16, pill_w, 28), border_radius=14)
+            pygame.draw.rect(screen, t["border"], (px, 16, pill_w, 28), 1, border_radius=14)
+            pygame.draw.circle(screen, gp_col, (px + 14, 30), 4)
+            screen.blit(self.font_badge.render(gp_txt, True, gp_col), (px + 24, 23))
 
         set_hover = (self._hover_zone == ("open_settings", None))
         quit_hover = (self._hover_zone == ("quit_app", None))
-        set_rect = pygame.Rect(w - 208, 16, 100, 30)
-        quit_rect = pygame.Rect(w - 100, 16, 76, 30)
+        set_rect = pygame.Rect(w - 208, 15, 100, 30)
+        quit_rect = pygame.Rect(w - 100, 15, 76, 30)
+        pygame.draw.rect(screen, t["border"], set_rect.move(0, 2), border_radius=6)
+        pygame.draw.rect(screen, t["border"], quit_rect.move(0, 2), border_radius=6)
         pygame.draw.rect(screen, t["set_btn_hover"] if set_hover else t["set_btn_bg"], set_rect, border_radius=6)
         pygame.draw.rect(screen, t["quit_btn_hover"] if quit_hover else t["quit_btn_bg"], quit_rect, border_radius=6)
         s_lbl = self.font_badge.render("SETTINGS", True, t["set_btn_fg"])
         q_lbl = self.font_badge.render("QUIT", True, t["quit_btn_fg"])
-        screen.blit(s_lbl, (set_rect.x + (100 - s_lbl.get_width()) // 2, 24))
-        screen.blit(q_lbl, (quit_rect.x + (76 - q_lbl.get_width()) // 2, 24))
+        screen.blit(s_lbl, (set_rect.x + (100 - s_lbl.get_width()) // 2, 23))
+        screen.blit(q_lbl, (quit_rect.x + (76 - q_lbl.get_width()) // 2, 23))
         self._click_zones.append((set_rect, "open_settings", None))
         self._click_zones.append((quit_rect, "quit_app", None))
 
@@ -708,15 +735,19 @@ class EmulatorUI:
         side_w = 320 if two_col else 0
         list_w = w - margin * 2 - (side_w + 20 if two_col else 0)
 
-        # Left Panel: ROM Library
+        # Left Panel: Console Game Library with 3D plastic bevel & dark faceplate bar
         list_panel = pygame.Rect(margin, top_y, list_w, content_h)
+        pygame.draw.rect(screen, t["border"], list_panel.move(2, 3), border_radius=12)
         pygame.draw.rect(screen, t["panel_bg"], list_panel, border_radius=12)
-        pygame.draw.rect(screen, t["border"], list_panel, 1, border_radius=12)
+        pygame.draw.rect(screen, t["border"], list_panel, 2, border_radius=12)
 
-        hdr_lbl = self.font_title.render("GAME LIBRARY", True, t["accent_hi"])
-        screen.blit(hdr_lbl, (margin + 20, top_y + 15))
-        cnt_lbl = self.font_small.render(f"{len(self.roms)} ROMs ready", True, t["muted"])
-        screen.blit(cnt_lbl, (margin + list_w - 20 - cnt_lbl.get_width(), top_y + 20))
+        # Dark charcoal console faceplate strip
+        pygame.draw.rect(screen, (40, 44, 56), (margin, top_y, list_w, 42), border_top_left_radius=12, border_top_right_radius=12)
+        pygame.draw.rect(screen, t["red_nes"], (margin + 14, top_y + 11, 5, 20), border_radius=2)
+        hdr_lbl = self.font_title.render("GAME LIBRARY", True, (245, 242, 234))
+        screen.blit(hdr_lbl, (margin + 28, top_y + 8))
+        cnt_lbl = self.font_badge.render(f"{len(self.roms)} CARTS READY", True, self.GOLD)
+        screen.blit(cnt_lbl, (margin + list_w - 18 - cnt_lbl.get_width(), top_y + 14))
 
         if not self.roms:
             msg = self.font_item.render("No .nes files found in ./roms/ — add .nes ROMs and relaunch.", True, t["sel_text"])
@@ -763,27 +794,41 @@ class EmulatorUI:
             self._click_zones.append((row_rect, "rom_row", idx))
             y += row_h
 
-        # Right Panel: Cover Preview, Specs & Quick Launch
+        # Right Panel: Recessed CRT TV / Cartridge Bay & Tactile Launch
         if two_col:
             sx = margin + list_w + 20
             side_rect = pygame.Rect(sx, top_y, side_w, content_h)
+            pygame.draw.rect(screen, t["border"], side_rect.move(2, 3), border_radius=12)
             pygame.draw.rect(screen, t["panel_bg"], side_rect, border_radius=12)
-            pygame.draw.rect(screen, t["border"], side_rect, 1, border_radius=12)
+            pygame.draw.rect(screen, t["border"], side_rect, 2, border_radius=12)
+
+            pygame.draw.rect(screen, (40, 44, 56), (sx, top_y, side_w, 42), border_top_left_radius=12, border_top_right_radius=12)
+            pygame.draw.rect(screen, t["red_nes"], (sx + 14, top_y + 11, 5, 20), border_radius=2)
+            screen.blit(self.font_title.render("CARTRIDGE BAY", True, (245, 242, 234)), (sx + 28, top_y + 8))
 
             display, _, path, info = self.roms[self.cursor]
-            screen.blit(self.font_title.render("SELECTED GAME", True, t["accent_hi"]), (sx + 18, top_y + 15))
 
-            # Cover preview (cached real game screenshot if played, else custom NES cartridge art)
-            art_rect = pygame.Rect(sx + 18, top_y + 48, side_w - 36, 168)
+            # Recessed CRT TV / Console Bezel around cover preview or NES Cartridge Art
+            bezel_rect = pygame.Rect(sx + 16, top_y + 52, side_w - 32, 180)
+            pygame.draw.rect(screen, (36, 40, 50), bezel_rect, border_radius=10)
+            pygame.draw.rect(screen, (66, 72, 88), bezel_rect, 2, border_radius=10)
+
+            art_rect = pygame.Rect(bezel_rect.x + 10, bezel_rect.y + 10, bezel_rect.w - 20, 140)
             thumb = self._get_thumb(path, info)
             if thumb is not None:
                 scaled_thumb = pygame.transform.smoothscale(thumb, (art_rect.w, art_rect.h))
                 screen.blit(scaled_thumb, art_rect.topleft)
-                pygame.draw.rect(screen, t["accent"], art_rect, 1, border_radius=8)
+                pygame.draw.rect(screen, (18, 20, 26), art_rect, 2, border_radius=6)
             else:
                 self._draw_cartridge_art(screen, art_rect, display, info)
 
-            title_y = art_rect.bottom + 12
+            # Iconic glowing red POWER LED + CH 03 CRT label inside bezel bottom
+            pygame.draw.circle(screen, (238, 48, 56), (bezel_rect.x + 16, bezel_rect.bottom - 13), 4)
+            screen.blit(self.font_badge.render("POWER", True, (186, 192, 208)), (bezel_rect.x + 26, bezel_rect.bottom - 20))
+            ch_lbl = self.font_badge.render("CH 03  NTSC", True, (132, 210, 152))
+            screen.blit(ch_lbl, (bezel_rect.right - ch_lbl.get_width() - 12, bezel_rect.bottom - 20))
+
+            title_y = bezel_rect.bottom + 12
             short_title = display if len(display) <= 28 else display[:26] + "..."
             screen.blit(self.font_bold.render(short_title, True, t["sel_text"]), (sx + 18, title_y))
 
@@ -794,24 +839,26 @@ class EmulatorUI:
                 ("Battery Save", "Yes" if info["battery"] else "No"),
                 ("Save Slot", f"Slot {self.cfg['emulation']['save_slot']}"),
             ]
-            sy = title_y + 30
+            sy = title_y + 28
             for k, v in specs:
                 if sy + 18 > top_y + content_h - 115:
                     break
                 screen.blit(self.font_small.render(k, True, t["muted"]), (sx + 18, sy))
                 vs = self.font_small.render(v, True, t["text"])
                 screen.blit(vs, (sx + side_w - 18 - vs.get_width(), sy))
-                sy += 22
+                sy += 21
 
             play_hover = (self._hover_zone == ("play_selected", None))
             play_rect = pygame.Rect(sx + 18, top_y + content_h - 106, side_w - 36, 44)
+            # 3D tactile NES START button shadow + face
+            pygame.draw.rect(screen, (142, 22, 30), play_rect.move(0, 3), border_radius=9)
             pygame.draw.rect(screen, t["red_hi"] if play_hover else t["red_nes"], play_rect, border_radius=9)
-            p_lbl = self.font_bold.render("PLAY GAME", True, (255, 255, 255))
+            p_lbl = self.font_bold.render("INSERT & PLAY", True, (255, 255, 255))
             screen.blit(p_lbl, (play_rect.x + (play_rect.w - p_lbl.get_width()) // 2, play_rect.y + 11))
             self._click_zones.append((play_rect, "play_selected", None))
 
-            ctrl_y = top_y + content_h - 52
-            screen.blit(self.font_small.render("Z/J: A  X/K: B  Arrows: Move", True, t["muted"]), (sx + 18, ctrl_y))
+            ctrl_y = top_y + content_h - 50
+            screen.blit(self.font_small.render("Z/J: A   X/K: B   Arrows: D-Pad", True, t["muted"]), (sx + 18, ctrl_y))
             screen.blit(self.font_small.render("ESC/F1: Menu  |  Tab: Settings", True, t["muted"]), (sx + 18, ctrl_y + 18))
 
         footer = self.font_small.render("RetroPlay NES  |  Open Source MIT  |  Gamepad + Keyboard Supported  |  ESC: Quit", True, t["muted"])
