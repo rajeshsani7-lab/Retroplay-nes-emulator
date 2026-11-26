@@ -36,8 +36,12 @@ class Header:
         self.four_screen = bool(flags6 & 0x08)
         self.mapper_id = ((flags7 & 0xF0) | (flags6 >> 4))
 
-        # iNES 2.0 detection
+        # iNES 2.0 detection & TV region (0 = NTSC, 1 = PAL)
         self.ines2 = (flags7 & 0x0C) == 0x08
+        if self.ines2:
+            self.is_pal = (raw[12] & 0x03) == 1
+        else:
+            self.is_pal = bool(raw[9] & 0x01)
 
 
 class Cartridge:
@@ -72,8 +76,14 @@ class Cartridge:
             )
         self.mapper = mapper_cls(self)
 
+        # Detect PAL vs NTSC from iNES header or standard filename region tags
+        fname_lower = rom_path.lower()
+        pal_tags = ("(europe)", "(e)", "(pal)", "(germany)", "(france)", "(spain)", "(italy)", "(uk)", "(australia)", "(sweden)")
+        self.region = "PAL" if (self.header.is_pal or any(t in fname_lower for t in pal_tags)) else "NTSC"
+
         print(f"[ROM] Loaded: {rom_path}")
         print(f"      Mapper : {self.header.mapper_id}")
+        print(f"      Region : {self.region} ({'50Hz' if self.region == 'PAL' else '60Hz'})")
         print(f"      PRG ROM: {self.header.prg_rom_size // 1024} KB")
         print(f"      CHR ROM: {self.header.chr_rom_size // 1024} KB")
         print(f"      Mirror : {self.header.mirroring}")

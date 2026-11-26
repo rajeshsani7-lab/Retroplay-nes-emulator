@@ -24,8 +24,10 @@ class Bus:
         self.ram  = bytearray(2048)  # 2 KB internal RAM
 
         # Devices
+        self.is_pal = (getattr(cartridge, 'region', 'NTSC') == 'PAL')
         self.ppu = PPU(self)
         self.apu = APU()
+        self.apu.set_region(self.is_pal)
         self.cpu = CPU(self)
 
         # Controller state: bit mask of pressed buttons
@@ -96,9 +98,10 @@ class Bus:
     # Fast Frame Step (Scanline based - 10x-30x faster)
     # -------------------------------------------------------------------------
     def step_frame(self, render=True):
-        """Emulate one full video frame (262 scanlines) with VBlank spin-loop fast forwarding."""
+        """Emulate one full video frame (262 NTSC / 312 PAL scanlines) with VBlank spin-loop fast forwarding."""
         self.ppu.frame_complete = False
-        cycles_per_scanline = 341.0 / 3.0   # ~113.667 CPU cycles
+        cycles_per_scanline = (341.0 / 3.2) if self.is_pal else (341.0 / 3.0)
+        vblank_scanlines = 70 if self.is_pal else 20
         cpu = self.cpu
         ppu = self.ppu
 
@@ -142,7 +145,7 @@ class Bus:
             cpu.nmi()
         ppu.frame_complete = True
 
-        vblank_cycles = cycles_per_scanline * 20 + carry
+        vblank_cycles = cycles_per_scanline * vblank_scanlines + carry
         if self.dma_active:
             self._handle_dma_fast()
             vblank_cycles -= 513

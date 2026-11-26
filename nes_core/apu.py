@@ -286,6 +286,8 @@ class APU:
         self.tri_phase  = 0.0
         self.noi_phase  = 0.0
         self.sample_accum = 0.0
+        self.cpu_clock  = float(CPU_CLOCK)
+        self.frame_rate = 60.0988
         self._lp_prev   = 0.0
         self.master_volume = 1.0
         self.lowpass_enabled = True
@@ -414,10 +416,15 @@ class APU:
         self.output_buffer.clear()
         return buf
 
+    def set_region(self, is_pal: bool):
+        """Configure APU clock and frame rate for PAL (50Hz) or NTSC (60Hz)."""
+        self.cpu_clock = 1662607.0 if is_pal else 1789773.0
+        self.frame_rate = 50.0070 if is_pal else 60.0988
+
     def generate_frame_audio(self, count=None):
         """Synthesize one NES frame of audio with accurate 240Hz/120Hz frame-sequencer stepping."""
         if count is None:
-            self.sample_accum += SAMPLE_RATE / 60.0988
+            self.sample_accum += SAMPLE_RATE / self.frame_rate
             count = int(self.sample_accum)
             self.sample_accum -= count
 
@@ -442,7 +449,7 @@ class APU:
             if not self.mute_p1 and p1.enabled and p1.length.active() and p1.timer_period >= 8 and not p1.sweep.muted(p1.timer_period):
                 p1_vol = (p1.envelope.output() / 15.0) * 0.20
                 if p1_vol > 0:
-                    step = (CPU_CLOCK / (16.0 * (p1.timer_period + 1))) / SAMPLE_RATE
+                    step = (self.cpu_clock / (16.0 * (p1.timer_period + 1))) / SAMPLE_RATE
                     phases = (self.p1_phase + t_steps * step) % 1.0
                     self.p1_phase = (self.p1_phase + seg_len * step) % 1.0
                     duty_thresh = (0.125, 0.25, 0.5, 0.75)[p1.duty]
@@ -453,7 +460,7 @@ class APU:
             if not self.mute_p2 and p2.enabled and p2.length.active() and p2.timer_period >= 8 and not p2.sweep.muted(p2.timer_period):
                 p2_vol = (p2.envelope.output() / 15.0) * 0.20
                 if p2_vol > 0:
-                    step = (CPU_CLOCK / (16.0 * (p2.timer_period + 1))) / SAMPLE_RATE
+                    step = (self.cpu_clock / (16.0 * (p2.timer_period + 1))) / SAMPLE_RATE
                     phases = (self.p2_phase + t_steps * step) % 1.0
                     self.p2_phase = (self.p2_phase + seg_len * step) % 1.0
                     duty_thresh = (0.125, 0.25, 0.5, 0.75)[p2.duty]
@@ -462,7 +469,7 @@ class APU:
             # Triangle
             tri = self.triangle
             if not self.mute_tri and tri.enabled and tri.length.active() and tri.linear_counter > 0 and tri.timer_period >= 2:
-                step = (CPU_CLOCK / (32.0 * (tri.timer_period + 1))) / SAMPLE_RATE
+                step = (self.cpu_clock / (32.0 * (tri.timer_period + 1))) / SAMPLE_RATE
                 phases = (self.tri_phase + t_steps * step) % 1.0
                 self.tri_phase = (self.tri_phase + seg_len * step) % 1.0
                 seg += np.where(phases < 0.5, 4.0 * phases - 1.0, 3.0 - 4.0 * phases) * 0.25
@@ -473,7 +480,7 @@ class APU:
                 noi_vol = (noi.envelope.output() / 15.0) * 0.16
                 if noi_vol > 0:
                     period = noi.timer_period if noi.timer_period > 0 else 4
-                    noi_step = (CPU_CLOCK / period) / SAMPLE_RATE
+                    noi_step = (self.cpu_clock / period) / SAMPLE_RATE
                     indices = ((self.noi_phase + t_steps * noi_step).astype(np.int32)) & 32767
                     self.noi_phase = (self.noi_phase + seg_len * noi_step) % 32768.0
                     seg += self.noise_table[indices] * noi_vol

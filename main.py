@@ -46,6 +46,7 @@ from nes_core.controllers import GamepadManager
 
 # NES timing constants
 NES_FPS         = 60.0988
+NES_FPS_PAL     = 50.0070
 NES_CPU_CLOCK   = 1789773   # Hz
 NES_PPU_CLOCK   = NES_CPU_CLOCK * 3
 CYCLES_PER_FRAME = NES_CPU_CLOCK / NES_FPS
@@ -159,7 +160,16 @@ class NESEmulator:
         if self.cfg["emulation"].get("auto_sram", True):
             self._load_sram()
         if pygame.display.get_surface():
-            pygame.display.set_caption(f"{WINDOW_TITLE} — {os.path.basename(rom_path)}")
+            reg = f" [{self.bus.cart.region}]" if self.bus.is_pal else ""
+            pygame.display.set_caption(f"{WINDOW_TITLE} — {os.path.basename(rom_path)}{reg}")
+        if hasattr(self, "_audio_buf"):
+            self._audio_buf.clear()
+            self._audio_samples = 0
+        if getattr(self, "audio_channel", None) is not None:
+            try:
+                self.audio_channel.stop()
+            except Exception:
+                pass
         self._apply_audio_settings()
 
     def _sram_path(self) -> str:
@@ -228,10 +238,11 @@ class NESEmulator:
 
     # ─────────────────────────────────────────────────────────────────────────
     def run(self):
-        target_frame_time = 1.0 / NES_FPS
         next_frame_time = time.perf_counter()
 
         while self.running:
+            target_fps = NES_FPS_PAL if (self.bus and self.bus.is_pal) else NES_FPS
+            target_frame_time = 1.0 / target_fps
             now = time.perf_counter()
             remaining = next_frame_time - now
             if remaining > 0.002:
