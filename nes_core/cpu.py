@@ -3,6 +3,12 @@ NES MOS 6502 CPU Emulator
 Implements the full 6502 instruction set used by the NES.
 """
 
+import numpy as np
+from .cpu_jit import HAS_NUMBA
+if HAS_NUMBA:
+    from .cpu_jit import jit_cpu_run
+
+
 class CPU:
     # Status flag bit positions
     FLAG_C = 0  # Carry
@@ -18,6 +24,12 @@ class CPU:
         self.bus = bus
         self.ram = bus.ram
         self.cart_read = bus.cart.mapper.cpu_read
+        self.prg_pages = getattr(bus.cart.mapper, 'prg_pages', None)
+        self.bus_read = bus.cpu_read
+        self.bus_write = bus.cpu_write
+        self._ram_np = np.frombuffer(bus.ram, dtype=np.uint8)
+        self._prg_np = np.frombuffer(bus.cart.prg_rom, dtype=np.uint8)
+        self._prg_off_np = np.zeros(4, dtype=np.int32)
 
         # Registers
         self.a = 0x00       # Accumulator
@@ -60,10 +72,12 @@ class CPU:
     def read(self, addr):
         addr &= 0xFFFF
         if addr >= 0x8000:
+            if self.prg_pages is not None:
+                return self.prg_pages[(addr >> 13) & 3][addr & 0x1FFF]
             return self.cart_read(addr)
         if addr < 0x2000:
             return self.ram[addr & 0x07FF]
-        return self.bus.cpu_read(addr)
+        return self.bus_read(addr)
 
     def write(self, addr, data):
         addr &= 0xFFFF
@@ -71,7 +85,7 @@ class CPU:
         if addr < 0x2000:
             self.ram[addr & 0x07FF] = data
             return
-        self.bus.cpu_write(addr, data)
+        self.bus_write(addr, data)
 
     # -------------------------------------------------------------------------
     # Stack helpers
@@ -157,6 +171,277 @@ class CPU:
         self.total_cycles += cycles
         return cycles
 
+    def run_cycles(self, budget: float) -> float:
+        """Fast inline 6502 execution loop using local variables; returns remaining cycle debt."""
+        if self.nmi_pending:
+            self.nmi_pending = False
+            self.push16(self.pc)
+            self.status = (self.status & ~0x10) | 0x20
+            self.push(self.status)
+            self.status |= 0x04
+            self.pc = (self.read(0xFFFB) << 8) | self.read(0xFFFA)
+            self.total_cycles += 7
+            budget -= 7
+            if budget <= 0:
+                return budget
+
+        if self.irq_pending and not (self.status & 0x04):
+            self.irq_pending = False
+            self.push16(self.pc)
+            self.status = (self.status & ~0x10) | 0x20
+            self.push(self.status)
+            self.status |= 0x04
+            self.pc = (self.read(0xFFFF) << 8) | self.read(0xFFFE)
+            self.total_cycles += 7
+            budget -= 7
+            if budget <= 0:
+                return budget
+
+        if HAS_NUMBA and hasattr(self.bus.cart.mapper, 'prg_offsets'):
+            ram_np = self._ram_np
+            prg_np = self._prg_np
+            off_np = self._prg_off_np
+            mapper = self.bus.cart.mapper
+            while budget > 0:
+                offs = mapper.prg_offsets
+                off_np[0], off_np[1], off_np[2], off_np[3] = offs[0], offs[1], offs[2], offs[3]
+                a, x, y, sp, pc, st, budget, tot, hit_io = jit_cpu_run(
+                    budget, self.a, self.x, self.y, self.sp, self.pc, self.status, self.total_cycles,
+                    ram_np, prg_np, off_np
+                )
+                self.a, self.x, self.y, self.sp, self.pc, self.status, self.total_cycles = (
+                    a, x, y, sp, pc, st, tot
+                )
+                if hit_io:
+                    budget -= self.step()
+            return budget
+
+        prg = self.prg_pages
+        if prg is None:
+            while budget > 0:
+                budget -= self.step()
+            return budget
+
+        ram = self.ram
+        bus_read = self.bus_read
+        bus_write = self.bus_write
+        op_table = self.opcodes_list
+        a = self.a
+        x = self.x
+        y = self.y
+        sp = self.sp
+        pc = self.pc
+        st = self.status
+        tot = self.total_cycles
+
+        while budget > 0:
+            if pc >= 0x8000:
+                op = prg[(pc >> 13) & 3][pc & 0x1FFF]
+            elif pc < 0x2000:
+                op = ram[pc & 0x07FF]
+            else:
+                op = bus_read(pc)
+            pc = (pc + 1) & 0xFFFF
+
+            # --- Fast inline hot opcodes ---
+            if op == 0xA9:  # LDA #imm
+                a = prg[(pc >> 13) & 3][pc & 0x1FFF] if pc >= 0x8000 else (ram[pc & 0x07FF] if pc < 0x2000 else bus_read(pc))
+                pc = (pc + 1) & 0xFFFF
+                st = (st & 0x7D) | (0x02 if a == 0 else 0) | (a & 0x80)
+                c = 2
+            elif op == 0xA5:  # LDA zp
+                zp = prg[(pc >> 13) & 3][pc & 0x1FFF] if pc >= 0x8000 else (ram[pc & 0x07FF] if pc < 0x2000 else bus_read(pc))
+                pc = (pc + 1) & 0xFFFF
+                a = ram[zp]
+                st = (st & 0x7D) | (0x02 if a == 0 else 0) | (a & 0x80)
+                c = 3
+            elif op == 0x85:  # STA zp
+                zp = prg[(pc >> 13) & 3][pc & 0x1FFF] if pc >= 0x8000 else (ram[pc & 0x07FF] if pc < 0x2000 else bus_read(pc))
+                pc = (pc + 1) & 0xFFFF
+                ram[zp] = a
+                c = 3
+            elif op == 0xAD:  # LDA abs
+                lo = prg[(pc >> 13) & 3][pc & 0x1FFF] if pc >= 0x8000 else bus_read(pc)
+                pc1 = (pc + 1) & 0xFFFF
+                hi = prg[(pc1 >> 13) & 3][pc1 & 0x1FFF] if pc1 >= 0x8000 else bus_read(pc1)
+                pc = (pc + 2) & 0xFFFF
+                addr = (hi << 8) | lo
+                a = prg[(addr >> 13) & 3][addr & 0x1FFF] if addr >= 0x8000 else (ram[addr & 0x07FF] if addr < 0x2000 else bus_read(addr))
+                st = (st & 0x7D) | (0x02 if a == 0 else 0) | (a & 0x80)
+                c = 4
+            elif op == 0x8D:  # STA abs
+                lo = prg[(pc >> 13) & 3][pc & 0x1FFF] if pc >= 0x8000 else bus_read(pc)
+                pc1 = (pc + 1) & 0xFFFF
+                hi = prg[(pc1 >> 13) & 3][pc1 & 0x1FFF] if pc1 >= 0x8000 else bus_read(pc1)
+                pc = (pc + 2) & 0xFFFF
+                addr = (hi << 8) | lo
+                if addr < 0x2000:
+                    ram[addr & 0x07FF] = a
+                else:
+                    bus_write(addr, a)
+                c = 4
+            elif op == 0xD0:  # BNE
+                off = prg[(pc >> 13) & 3][pc & 0x1FFF] if pc >= 0x8000 else bus_read(pc)
+                pc = (pc + 1) & 0xFFFF
+                if not (st & 0x02):
+                    if off & 0x80: off -= 0x100
+                    npc = (pc + off) & 0xFFFF
+                    c = 4 if (pc & 0xFF00) != (npc & 0xFF00) else 3
+                    pc = npc
+                else:
+                    c = 2
+            elif op == 0xF0:  # BEQ
+                off = prg[(pc >> 13) & 3][pc & 0x1FFF] if pc >= 0x8000 else bus_read(pc)
+                pc = (pc + 1) & 0xFFFF
+                if st & 0x02:
+                    if off & 0x80: off -= 0x100
+                    npc = (pc + off) & 0xFFFF
+                    c = 4 if (pc & 0xFF00) != (npc & 0xFF00) else 3
+                    pc = npc
+                else:
+                    c = 2
+            elif op == 0x10:  # BPL
+                off = prg[(pc >> 13) & 3][pc & 0x1FFF] if pc >= 0x8000 else bus_read(pc)
+                pc = (pc + 1) & 0xFFFF
+                if not (st & 0x80):
+                    if off & 0x80: off -= 0x100
+                    npc = (pc + off) & 0xFFFF
+                    c = 4 if (pc & 0xFF00) != (npc & 0xFF00) else 3
+                    pc = npc
+                else:
+                    c = 2
+            elif op == 0x30:  # BMI
+                off = prg[(pc >> 13) & 3][pc & 0x1FFF] if pc >= 0x8000 else bus_read(pc)
+                pc = (pc + 1) & 0xFFFF
+                if st & 0x80:
+                    if off & 0x80: off -= 0x100
+                    npc = (pc + off) & 0xFFFF
+                    c = 4 if (pc & 0xFF00) != (npc & 0xFF00) else 3
+                    pc = npc
+                else:
+                    c = 2
+            elif op == 0x4C:  # JMP abs
+                lo = prg[(pc >> 13) & 3][pc & 0x1FFF] if pc >= 0x8000 else bus_read(pc)
+                pc1 = (pc + 1) & 0xFFFF
+                hi = prg[(pc1 >> 13) & 3][pc1 & 0x1FFF] if pc1 >= 0x8000 else bus_read(pc1)
+                pc = (hi << 8) | lo
+                c = 3
+            elif op == 0x20:  # JSR abs
+                lo = prg[(pc >> 13) & 3][pc & 0x1FFF] if pc >= 0x8000 else bus_read(pc)
+                pc1 = (pc + 1) & 0xFFFF
+                hi = prg[(pc1 >> 13) & 3][pc1 & 0x1FFF] if pc1 >= 0x8000 else bus_read(pc1)
+                ret = (pc + 1) & 0xFFFF
+                ram[0x0100 + sp] = (ret >> 8) & 0xFF
+                sp = (sp - 1) & 0xFF
+                ram[0x0100 + sp] = ret & 0xFF
+                sp = (sp - 1) & 0xFF
+                pc = (hi << 8) | lo
+                c = 6
+            elif op == 0x60:  # RTS
+                sp = (sp + 1) & 0xFF
+                lo = ram[0x0100 + sp]
+                sp = (sp + 1) & 0xFF
+                hi = ram[0x0100 + sp]
+                pc = (((hi << 8) | lo) + 1) & 0xFFFF
+                c = 6
+            elif op == 0x65:  # ADC zp
+                zp = prg[(pc >> 13) & 3][pc & 0x1FFF] if pc >= 0x8000 else bus_read(pc)
+                pc = (pc + 1) & 0xFFFF
+                val = ram[zp]
+                res = a + val + (st & 0x01)
+                res8 = res & 0xFF
+                st = (st & ~0xC3) | (0x01 if res > 0xFF else 0) | (0x40 if (~(a ^ val) & (a ^ res) & 0x80) else 0) | (0x02 if res8 == 0 else 0) | (res8 & 0x80)
+                a = res8
+                c = 3
+            elif op == 0x69:  # ADC #imm
+                val = prg[(pc >> 13) & 3][pc & 0x1FFF] if pc >= 0x8000 else bus_read(pc)
+                pc = (pc + 1) & 0xFFFF
+                res = a + val + (st & 0x01)
+                res8 = res & 0xFF
+                st = (st & ~0xC3) | (0x01 if res > 0xFF else 0) | (0x40 if (~(a ^ val) & (a ^ res) & 0x80) else 0) | (0x02 if res8 == 0 else 0) | (res8 & 0x80)
+                a = res8
+                c = 2
+            elif op == 0xE8:  # INX
+                x = (x + 1) & 0xFF
+                st = (st & 0x7D) | (0x02 if x == 0 else 0) | (x & 0x80)
+                c = 2
+            elif op == 0xCA:  # DEX
+                x = (x - 1) & 0xFF
+                st = (st & 0x7D) | (0x02 if x == 0 else 0) | (x & 0x80)
+                c = 2
+            elif op == 0xC8:  # INY
+                y = (y + 1) & 0xFF
+                st = (st & 0x7D) | (0x02 if y == 0 else 0) | (y & 0x80)
+                c = 2
+            elif op == 0x88:  # DEY
+                y = (y - 1) & 0xFF
+                st = (st & 0x7D) | (0x02 if y == 0 else 0) | (y & 0x80)
+                c = 2
+            elif op == 0xE6:  # INC zp
+                zp = prg[(pc >> 13) & 3][pc & 0x1FFF] if pc >= 0x8000 else bus_read(pc)
+                pc = (pc + 1) & 0xFFFF
+                v = (ram[zp] + 1) & 0xFF
+                ram[zp] = v
+                st = (st & 0x7D) | (0x02 if v == 0 else 0) | (v & 0x80)
+                c = 5
+            elif op == 0xC6:  # DEC zp
+                zp = prg[(pc >> 13) & 3][pc & 0x1FFF] if pc >= 0x8000 else bus_read(pc)
+                pc = (pc + 1) & 0xFFFF
+                v = (ram[zp] - 1) & 0xFF
+                ram[zp] = v
+                st = (st & 0x7D) | (0x02 if v == 0 else 0) | (v & 0x80)
+                c = 5
+            elif op == 0xA2:  # LDX #imm
+                x = prg[(pc >> 13) & 3][pc & 0x1FFF] if pc >= 0x8000 else bus_read(pc)
+                pc = (pc + 1) & 0xFFFF
+                st = (st & 0x7D) | (0x02 if x == 0 else 0) | (x & 0x80)
+                c = 2
+            elif op == 0xA0:  # LDY #imm
+                y = prg[(pc >> 13) & 3][pc & 0x1FFF] if pc >= 0x8000 else bus_read(pc)
+                pc = (pc + 1) & 0xFFFF
+                st = (st & 0x7D) | (0x02 if y == 0 else 0) | (y & 0x80)
+                c = 2
+            elif op == 0xC9:  # CMP #imm
+                val = prg[(pc >> 13) & 3][pc & 0x1FFF] if pc >= 0x8000 else bus_read(pc)
+                pc = (pc + 1) & 0xFFFF
+                res = (a - val) & 0xFF
+                st = (st & ~0x83) | (0x01 if a >= val else 0) | (0x02 if res == 0 else 0) | (res & 0x80)
+                c = 2
+            elif op == 0x18:  # CLC
+                st &= ~0x01; c = 2
+            elif op == 0x38:  # SEC
+                st |= 0x01; c = 2
+            elif op == 0xAA:  # TAX
+                x = a; st = (st & 0x7D) | (0x02 if x == 0 else 0) | (x & 0x80); c = 2
+            elif op == 0x8A:  # TXA
+                a = x; st = (st & 0x7D) | (0x02 if a == 0 else 0) | (a & 0x80); c = 2
+            elif op == 0xA8:  # TAY
+                y = a; st = (st & 0x7D) | (0x02 if y == 0 else 0) | (y & 0x80); c = 2
+            elif op == 0x98:  # TYA
+                a = y; st = (st & 0x7D) | (0x02 if a == 0 else 0) | (a & 0x80); c = 2
+            elif op == 0x48:  # PHA
+                ram[0x0100 + sp] = a; sp = (sp - 1) & 0xFF; c = 3
+            elif op == 0x68:  # PLA
+                sp = (sp + 1) & 0xFF; a = ram[0x0100 + sp]
+                st = (st & 0x7D) | (0x02 if a == 0 else 0) | (a & 0x80); c = 4
+            elif op == 0xEA:  # NOP
+                c = 2
+            else:
+                # Sync state to self for fallback handler
+                self.a, self.x, self.y, self.sp, self.pc, self.status = a, x, y, sp, pc, st
+                fn, addr_mode, base_cycles = op_table[op]
+                addr, page_crossed = addr_mode()
+                extra = fn(addr, page_crossed)
+                c = base_cycles + (1 if extra else 0)
+                a, x, y, sp, pc, st = self.a, self.x, self.y, self.sp, self.pc, self.status | 0x20
+
+            budget -= c
+            tot += c
+
+        self.a, self.x, self.y, self.sp, self.pc, self.status = a, x, y, sp, pc, st | 0x20
+        self.total_cycles = tot
+        return budget
+
     # -------------------------------------------------------------------------
     # Clock
     # -------------------------------------------------------------------------
@@ -186,7 +471,7 @@ class CPU:
     # Addressing Modes  (return: effective_address, page_crossed)
     # =========================================================================
     def _imp(self):
-        return 0, False  # Implied / Accumulator
+        return None, False  # Implied / Accumulator
 
     def _imm(self):
         addr = self.pc
@@ -259,7 +544,7 @@ class CPU:
         offset = self.read(self.pc);  self.pc = (self.pc + 1) & 0xFFFF
         if offset & 0x80:
             offset -= 0x100
-        return self.pc + offset, False
+        return (self.pc + offset) & 0xFFFF, False
 
     # =========================================================================
     # Instructions
@@ -320,20 +605,34 @@ class CPU:
     # --- Arithmetic ---
     def ADC(self, addr, pc):
         val = self.read(addr)
-        result = self.a + val + self.get_flag(self.FLAG_C)
-        self.set_flag(self.FLAG_C, result > 0xFF)
-        self.set_flag(self.FLAG_V, (~(self.a ^ val) & (self.a ^ result) & 0x80) != 0)
-        self.a = result & 0xFF
-        self.set_nz(self.a)
+        a = self.a
+        result = a + val + (self.status & 0x01)
+        res8 = result & 0xFF
+        st = self.status & ~0xC3  # clear N, V, Z, C
+        if result > 0xFF:
+            st |= 0x01
+        if (~(a ^ val) & (a ^ result) & 0x80):
+            st |= 0x40
+        if res8 == 0:
+            st |= 0x02
+        self.status = st | (res8 & 0x80)
+        self.a = res8
         return pc
 
     def SBC(self, addr, pc):
         val = self.read(addr) ^ 0xFF
-        result = self.a + val + self.get_flag(self.FLAG_C)
-        self.set_flag(self.FLAG_C, result > 0xFF)
-        self.set_flag(self.FLAG_V, ((self.a ^ result) & (val ^ result) & 0x80) != 0)
-        self.a = result & 0xFF
-        self.set_nz(self.a)
+        a = self.a
+        result = a + val + (self.status & 0x01)
+        res8 = result & 0xFF
+        st = self.status & ~0xC3  # clear N, V, Z, C
+        if result > 0xFF:
+            st |= 0x01
+        if ((a ^ result) & (val ^ result) & 0x80):
+            st |= 0x40
+        if res8 == 0:
+            st |= 0x02
+        self.status = st | (res8 & 0x80)
+        self.a = res8
         return pc
 
     # --- Logical ---
@@ -347,9 +646,9 @@ class CPU:
     # --- Compare ---
     def _cmp(self, reg, addr, pc):
         val = self.read(addr)
-        result = reg - val
-        self.set_flag(self.FLAG_C, reg >= val)
-        self.set_nz(result & 0xFF)
+        res = (reg - val) & 0xFF
+        st = (self.status & ~0x83) | (0x01 if reg >= val else 0) | (0x02 if res == 0 else 0) | (res & 0x80)
+        self.status = st
         return pc
 
     def CMP(self, addr, pc): return self._cmp(self.a, addr, pc)
@@ -365,66 +664,106 @@ class CPU:
 
     # --- Shift / Rotate ---
     def ASL(self, addr, _):
-        if addr == 0:  # accumulator mode
+        if addr is None:  # accumulator mode
             self.set_flag(self.FLAG_C, (self.a >> 7) & 1)
             self.a = (self.a << 1) & 0xFF
             self.set_nz(self.a)
         else:
             val = self.read(addr)
             self.set_flag(self.FLAG_C, (val >> 7) & 1)
-            val = (val << 1) & 0xFF
-            self.write(addr, val)
-            self.set_nz(val)
+            new_val = (val << 1) & 0xFF
+            if addr >= 0x8000:
+                self.write(addr, val)
+                self.bus.rmw_second_write = True
+                self.write(addr, new_val)
+                self.bus.rmw_second_write = False
+            else:
+                self.write(addr, new_val)
+            self.set_nz(new_val)
         return False
 
     def LSR(self, addr, _):
-        if addr == 0:
+        if addr is None:
             self.set_flag(self.FLAG_C, self.a & 1)
             self.a >>= 1
             self.set_nz(self.a)
         else:
             val = self.read(addr)
             self.set_flag(self.FLAG_C, val & 1)
-            val >>= 1
-            self.write(addr, val)
-            self.set_nz(val)
+            new_val = val >> 1
+            if addr >= 0x8000:
+                self.write(addr, val)
+                self.bus.rmw_second_write = True
+                self.write(addr, new_val)
+                self.bus.rmw_second_write = False
+            else:
+                self.write(addr, new_val)
+            self.set_nz(new_val)
         return False
 
     def ROL(self, addr, _):
         c = self.get_flag(self.FLAG_C)
-        if addr == 0:
+        if addr is None:
             self.set_flag(self.FLAG_C, (self.a >> 7) & 1)
             self.a = ((self.a << 1) | c) & 0xFF
             self.set_nz(self.a)
         else:
             val = self.read(addr)
             self.set_flag(self.FLAG_C, (val >> 7) & 1)
-            val = ((val << 1) | c) & 0xFF
-            self.write(addr, val)
-            self.set_nz(val)
+            new_val = ((val << 1) | c) & 0xFF
+            if addr >= 0x8000:
+                self.write(addr, val)
+                self.bus.rmw_second_write = True
+                self.write(addr, new_val)
+                self.bus.rmw_second_write = False
+            else:
+                self.write(addr, new_val)
+            self.set_nz(new_val)
         return False
 
     def ROR(self, addr, _):
         c = self.get_flag(self.FLAG_C)
-        if addr == 0:
+        if addr is None:
             self.set_flag(self.FLAG_C, self.a & 1)
             self.a = ((c << 7) | (self.a >> 1)) & 0xFF
             self.set_nz(self.a)
         else:
             val = self.read(addr)
             self.set_flag(self.FLAG_C, val & 1)
-            val = ((c << 7) | (val >> 1)) & 0xFF
-            self.write(addr, val)
-            self.set_nz(val)
+            new_val = ((c << 7) | (val >> 1)) & 0xFF
+            if addr >= 0x8000:
+                self.write(addr, val)
+                self.bus.rmw_second_write = True
+                self.write(addr, new_val)
+                self.bus.rmw_second_write = False
+            else:
+                self.write(addr, new_val)
+            self.set_nz(new_val)
         return False
 
     # --- Increment / Decrement ---
     def INC(self, addr, _):
-        val = (self.read(addr) + 1) & 0xFF
-        self.write(addr, val); self.set_nz(val); return False
+        val = self.read(addr)
+        new_val = (val + 1) & 0xFF
+        if addr >= 0x8000:
+            self.write(addr, val)
+            self.bus.rmw_second_write = True
+            self.write(addr, new_val)
+            self.bus.rmw_second_write = False
+        else:
+            self.write(addr, new_val)
+        self.set_nz(new_val); return False
     def DEC(self, addr, _):
-        val = (self.read(addr) - 1) & 0xFF
-        self.write(addr, val); self.set_nz(val); return False
+        val = self.read(addr)
+        new_val = (val - 1) & 0xFF
+        if addr >= 0x8000:
+            self.write(addr, val)
+            self.bus.rmw_second_write = True
+            self.write(addr, new_val)
+            self.bus.rmw_second_write = False
+        else:
+            self.write(addr, new_val)
+        self.set_nz(new_val); return False
     def INX(self, addr, _):
         self.x = (self.x + 1) & 0xFF; self.set_nz(self.x); return False
     def INY(self, addr, _):
@@ -456,23 +795,23 @@ class CPU:
             return extra
         return 0
 
-    def BCC(self, addr, _): return self._branch(self.get_flag(self.FLAG_C) == 0, addr)
-    def BCS(self, addr, _): return self._branch(self.get_flag(self.FLAG_C) == 1, addr)
-    def BEQ(self, addr, _): return self._branch(self.get_flag(self.FLAG_Z) == 1, addr)
-    def BNE(self, addr, _): return self._branch(self.get_flag(self.FLAG_Z) == 0, addr)
-    def BMI(self, addr, _): return self._branch(self.get_flag(self.FLAG_N) == 1, addr)
-    def BPL(self, addr, _): return self._branch(self.get_flag(self.FLAG_N) == 0, addr)
-    def BVC(self, addr, _): return self._branch(self.get_flag(self.FLAG_V) == 0, addr)
-    def BVS(self, addr, _): return self._branch(self.get_flag(self.FLAG_V) == 1, addr)
+    def BCC(self, addr, _): return self._branch((self.status & 0x01) == 0, addr)
+    def BCS(self, addr, _): return self._branch((self.status & 0x01) != 0, addr)
+    def BEQ(self, addr, _): return self._branch((self.status & 0x02) != 0, addr)
+    def BNE(self, addr, _): return self._branch((self.status & 0x02) == 0, addr)
+    def BMI(self, addr, _): return self._branch((self.status & 0x80) != 0, addr)
+    def BPL(self, addr, _): return self._branch((self.status & 0x80) == 0, addr)
+    def BVC(self, addr, _): return self._branch((self.status & 0x40) == 0, addr)
+    def BVS(self, addr, _): return self._branch((self.status & 0x40) != 0, addr)
 
     # --- Flag operations ---
-    def CLC(self, addr, _): self.set_flag(self.FLAG_C, 0); return False
-    def CLD(self, addr, _): self.set_flag(self.FLAG_D, 0); return False
-    def CLI(self, addr, _): self.set_flag(self.FLAG_I, 0); return False
-    def CLV(self, addr, _): self.set_flag(self.FLAG_V, 0); return False
-    def SEC(self, addr, _): self.set_flag(self.FLAG_C, 1); return False
-    def SED(self, addr, _): self.set_flag(self.FLAG_D, 1); return False
-    def SEI(self, addr, _): self.set_flag(self.FLAG_I, 1); return False
+    def CLC(self, addr, _): self.status &= ~0x01; return False
+    def CLD(self, addr, _): self.status &= ~0x08; return False
+    def CLI(self, addr, _): self.status &= ~0x04; return False
+    def CLV(self, addr, _): self.status &= ~0x40; return False
+    def SEC(self, addr, _): self.status |= 0x01; return False
+    def SED(self, addr, _): self.status |= 0x08; return False
+    def SEI(self, addr, _): self.status |= 0x04; return False
 
     # --- System ---
     def NOP(self, addr, _): return False

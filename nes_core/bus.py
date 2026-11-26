@@ -37,6 +37,8 @@ class Bus:
 
         # Timing
         self.system_clock = 0
+        self.rmw_second_write = False
+        cartridge.bus = self
         self.dma_active   = False
         self.dma_page     = 0x00
         self.dma_addr     = 0x00
@@ -101,41 +103,38 @@ class Bus:
         ppu = self.ppu
 
         # 1. Visible scanlines (0 to 239)
+        carry = 0.0
         for scanline in range(240):
-            target = cycles_per_scanline
-            while target > 0:
-                if self.dma_active:
-                    self._handle_dma_fast()
-                    target -= 513
-                else:
-                    # Detect idle VBlank wait loops:
-                    # e.g. LDA $2002; BPL -5 (0xAD 0x02 0x20 0x10 0xFB) or BIT $2002; BPL -5 (0x2C 0x02 0x20 0x10 0xFB)
-                    # Before scanline 241, VBlank flag (bit 7) is guaranteed to be 0, so loop cannot exit until VBlank.
-                    if not (ppu.status & 0x80):
-                        pc = cpu.pc
-                        op = cpu.read(pc)
-                        if op in (0xAD, 0x2C) and cpu.read(pc + 1) == 0x02 and cpu.read(pc + 2) == 0x20:
-                            if cpu.read(pc + 3) == 0x10 and cpu.read(pc + 4) == 0xFB:
-                                target = 0
-                                break
-                    target -= cpu.step()
-            ppu.render_scanline(scanline, render=render)
-
-        # 2. Post-render scanline (240)
-        target = cycles_per_scanline
-        while target > 0:
+            target = cycles_per_scanline + carry
             if self.dma_active:
                 self._handle_dma_fast()
                 target -= 513
-            else:
+            if target > 0:
                 if not (ppu.status & 0x80):
                     pc = cpu.pc
                     op = cpu.read(pc)
                     if op in (0xAD, 0x2C) and cpu.read(pc + 1) == 0x02 and cpu.read(pc + 2) == 0x20:
                         if cpu.read(pc + 3) == 0x10 and cpu.read(pc + 4) == 0xFB:
-                            target = 0
-                            break
-                target -= cpu.step()
+                            target = 0.0
+                if target > 0:
+                    carry = cpu.run_cycles(target)
+                else:
+                    carry = 0.0
+            else:
+                carry = target
+            ppu.render_scanline(scanline, render=render)
+            if (ppu.mask & 0x18) and self.cart.clock_scanline():
+                cpu.irq()
+
+        # 2. Post-render scanline (240)
+        target = cycles_per_scanline + carry
+        if self.dma_active:
+            self._handle_dma_fast()
+            target -= 513
+        if target > 0:
+            carry = cpu.run_cycles(target)
+        else:
+            carry = target
 
         # 3. VBlank (scanline 241)
         ppu.status |= 0x80
@@ -143,23 +142,26 @@ class Bus:
             cpu.nmi()
         ppu.frame_complete = True
 
-        vblank_cycles = cycles_per_scanline * 20
-        while vblank_cycles > 0:
-            if self.dma_active:
-                self._handle_dma_fast()
-                vblank_cycles -= 513
-            else:
-                vblank_cycles -= cpu.step()
+        vblank_cycles = cycles_per_scanline * 20 + carry
+        if self.dma_active:
+            self._handle_dma_fast()
+            vblank_cycles -= 513
+        if vblank_cycles > 0:
+            carry = cpu.run_cycles(vblank_cycles)
+        else:
+            carry = vblank_cycles
 
         # 4. Pre-render scanline (261)
         ppu.status &= ~0xE0
-        target = cycles_per_scanline
-        while target > 0:
-            if self.dma_active:
-                self._handle_dma_fast()
-                target -= 513
-            else:
-                target -= cpu.step()
+        if ppu.mask & 0x18:
+            ppu.v = (ppu.v & ~0x7BE0) | (ppu.t & 0x7BE0)
+            ppu.v = (ppu.v & ~0x041F) | (ppu.t & 0x041F)
+        target = cycles_per_scanline + carry
+        if self.dma_active:
+            self._handle_dma_fast()
+            target -= 513
+        if target > 0:
+            cpu.run_cycles(target)
 
     def _handle_dma_fast(self):
         page = self.dma_page << 8

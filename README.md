@@ -1,163 +1,131 @@
-# 🎮 RetroPlay — NES Emulator
+# RetroPlay — NES Emulator
 
-A fully open-source **NES (Nintendo Entertainment System) emulator** written from scratch in Python.
-Play your classic NES games — Contra, Mega Man, Castlevania, Duck Tales, and more!
+[![CI](https://github.com/rajeshsani7-lab/Retroplay-nes-emulator/actions/workflows/ci.yml/badge.svg)](https://github.com/rajeshsani7-lab/Retroplay-nes-emulator/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-crimson.svg)](LICENSE)
 
----
+An open-source **NES (Nintendo Entertainment System) emulator** written in Python, accelerated with **Numba JIT** for locked 60.1 FPS gameplay, crisp 44.1 kHz audio, universal controller support, and a nostalgic **Retro Light** hardware interface.
 
-## ✨ Features
-
-- ✅ **Full MOS 6502 CPU** — all official opcodes implemented
-- ✅ **PPU (graphics)** — background tiles, sprites, scrolling, palette
-- ✅ **APU (audio)** — Pulse, Triangle, and Noise channels
-- ✅ **Mapper support** — Mapper 0 (NROM), 1 (MMC1), 2 (UxROM/Contra!), 3 (CNROM)
-- ✅ **Two-player support** — keyboard-mapped controllers
-- ✅ **Save states** — F7 to save, F8 to load
-- ✅ **Debug overlay** — CPU registers, scanline counter
-- ✅ **Fullscreen mode** — press F11
-
-## 🕹️ Games Supported (by Mapper)
-
-| Mapper | Games |
-|--------|-------|
-| 0 (NROM) | Donkey Kong, Excitebike, Balloon Fight, Ice Climber |
-| 1 (MMC1) | Mega Man 2, Legend of Zelda, Metroid, Tetris |
-| **2 (UxROM)** | **Contra ✅**, Duck Tales, Mega Man, Castlevania |
-| 3 (CNROM) | Donkey Kong Jr, Popeye |
-
-> **Note on Mario**: Super Mario Bros uses Mapper 0 (NROM). It is fully supported.
+Created and maintained by **Rajesh Sani ([@rajeshsani7-lab](https://github.com/rajeshsani7-lab))**.
 
 ---
 
-## 🚀 Quick Start
+## Interface Showcase
 
-### 1. Install dependencies
+| Game Library (`Retro Light`) | Video & Theme Settings (`ESC` / `F1`) |
+|---|---|
+| ![RetroPlay Game Library](docs/screenshots/library.png) | ![RetroPlay Video Settings](docs/screenshots/settings.png) |
+
+---
+
+## Features
+
+- **MOS 6502 CPU** — All official opcodes + Numba JIT execution (`nes_core/cpu_jit.py`) with automatic pure-Python fallback
+- **PPU (Graphics)** — Loopy `v`/`t` scrolling (mid-frame HUD splits), Sprite 0 hit, background/sprite priorities, and Numba JIT scanline rendering
+- **APU (Audio)** — Pulse 1 & 2 (duty, sweep, envelope), Triangle, and 15-bit NES LFSR Noise with 240Hz/120Hz frame sequencer, low-pass warmth filter, master volume slider, and per-channel mutes
+- **Wide Mapper Support** — Mappers **0** (NROM), **1** (MMC1), **2** (UxROM), **3** (CNROM), **4** (MMC3 + scanline IRQ), **9** (MMC2), **23** (Konami VRC2b/VRC4e), and **227** (Multicarts)
+- **Retro Light & Midnight Dark Themes** — Classic NES cream/red light theme by default, switchable live in **Settings → Video → Color Theme**
+- **Graphical ROM Library & 4-Tab Settings (`ESC` / `F1`)** — Cached gameplay cover previews, styled NES cartridge art, mouse/keyboard/gamepad menu navigation, saved in `settings.json`
+- **Display Options** — Windowed (`2x`/`3x`/`4x`) & Fullscreen (`F11`), Aspect Ratio (`16:9` / `4:3` / `1:1 Pixel`, `F10`), Sharp vs Smooth scaling, CRT Scanlines (`F9`), 8px Overscan Crop, and FPS HUD (`F3`)
+- **9 Save State Slots (`F7` / `F8`) & Battery `.sav`** — Persists CPU, RAM, PPU, CHR-RAM, mapper banks, and battery SRAM
+- **Universal Controller Support** — Automatic plug-and-play for Xbox, PlayStation, Switch Pro, and generic USB/DirectInput gamepads (`nes_core/controllers.py`), plus live keyboard remapping
+
+---
+
+## Supported Mappers & Example Games
+
+| Mapper | Name | Example Games |
+|--------|------|---------------|
+| 0 | NROM | Super Mario Bros., Ice Hockey, Donkey Kong, Excitebike |
+| 1 | MMC1 | Snow Brothers, Teenage Mutant Ninja Turtles, Zelda, Metroid |
+| 2 | UxROM | Contra (US), Mega Man, Castlevania, Duck Tales |
+| 3 | CNROM | Donkey Kong Jr., Popeye |
+| 4 | MMC3 | Super Mario Bros. 3, Super Contra, TMNT III, Kirby's Adventure |
+| 9 | MMC2 | Mike Tyson's Punch-Out!! |
+| 23 | VRC2b/VRC4e | Contra (Japan) |
+| 227 | Multicart | 1200-in-1, 57-in-1 |
+
+---
+
+## Quick Start
+
+### 1. Clone & install dependencies
 
 ```bash
-pip install pygame numpy
+git clone https://github.com/rajeshsani7-lab/Retroplay-nes-emulator.git
+cd Retroplay-nes-emulator
+pip install -r requirements.txt
 ```
 
-### 2. Add your ROMs
+### 2. Add your own `.nes` ROMs
 
-Put your legally-owned `.nes` ROM files in the `roms/` folder:
-```
-nes-emulator/
+Place your legally-owned `.nes` ROM files inside `roms/`:
+```text
+Retroplay-nes-emulator/
   roms/
     contra.nes
-    mario.nes
-    megaman.nes
+    mario3.nes
 ```
 
-### 3. Run!
+### 3. Play
 
 ```bash
-# Auto-detect ROMs in the roms/ folder
+# Open the graphical Game Library
 python main.py
 
-# Load a specific ROM
+# Or launch a ROM directly
 python main.py roms/contra.nes
-
-# 4× zoom (1024×960 window)
-python main.py roms/contra.nes --scale 4
-
-# Debug overlay (CPU registers visible)
-python main.py roms/contra.nes --debug
+python main.py roms/contra.nes --fullscreen
 ```
+
+On Windows, you can also double-click `play.bat` or `play_fullscreen_16x9.bat`.
 
 ---
 
-## 🎮 Controls
+## Controls & Hotkeys
 
-### Player 1
+### Player 1 (Default — Remappable in Settings)
 | Key | NES Button |
 |-----|-----------|
-| ← → ↑ ↓ | D-Pad |
-| Z | A |
-| X | B |
-| Enter | Start |
-| Right Shift | Select |
+| Arrow Keys | D-Pad |
+| `Z` / `J` | A |
+| `X` / `K` | B |
+| `Enter` | Start |
+| `Right Shift` / `Space` | Select |
 
-### Player 2
-| Key | NES Button |
-|-----|-----------|
-| A S D W | D-Pad |
-| , (Comma) | A |
-| . (Period) | B |
-| 1 | Start |
-| 2 | Select |
+*Any connected USB or Bluetooth controller works automatically (`Start+Select` or Guide button opens the Pause Menu).*
 
-### Emulator
+### Emulator Hotkeys
 | Key | Action |
 |-----|--------|
-| ESC | Quit |
-| F5 | Reset game |
-| F7 | Save state |
-| F8 | Load state |
-| F11 | Toggle fullscreen |
-| P | Pause / Resume |
+| `ESC` / `F1` | Open Pause & Settings Menu |
+| `F11` | Toggle Fullscreen / Windowed |
+| `F10` | Cycle Aspect Ratio (`16:9` / `4:3` / `1:1`) |
+| `F9` | Cycle CRT Scanlines (`Off` / `Light` / `Classic`) |
+| `F7` / `F8` | Save / Load State (current slot) |
+| `F5` | Reset Console |
+| `F12` | Take Screenshot |
+| `F3` | Toggle FPS & Slot HUD |
+| `M` | Mute / Unmute Audio |
+| `Tab` (hold) | Fast Forward (`2x` / `3x` / `4x`) |
+| `P` | Quick Pause / Resume |
 
 ---
 
-## 🗂️ Project Structure
+## Running Tests
 
-```
-nes-emulator/
-├── main.py               ← Entry point, window & game loop
-├── requirements.txt
-├── roms/                 ← Put your .nes files here
-└── nes_core/
-    ├── __init__.py
-    ├── cpu.py            ← MOS 6502 CPU (all opcodes)
-    ├── ppu.py            ← Picture Processing Unit (graphics)
-    ├── apu.py            ← Audio Processing Unit (sound)
-    ├── bus.py            ← System bus (connects everything)
-    └── cartridge.py      ← ROM loader + Mappers 0,1,2,3
+```bash
+python -m unittest discover -s tests -v
 ```
 
 ---
 
-## 🔧 Adding More Mappers
+## Contributing & Ownership
 
-Extending mapper support is easy! Open `nes_core/cartridge.py` and add a new class:
-
-```python
-@register_mapper(4)   # Mapper 4 = MMC3 (Super Mario Bros 3, Contra Force...)
-class Mapper4:
-    def __init__(self, cart): ...
-    def cpu_read(self, addr): ...
-    def cpu_write(self, addr, data): ...
-    def ppu_read(self, addr): ...
-    def ppu_write(self, addr, data): ...
-    def get_mirroring(self): ...
-```
+Everyone is welcome to **fork** this repository to customize themes, add custom mappers, or tailor controls to their own taste, and submit Pull Requests. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.  
+All Pull Requests are reviewed and merged solely by repository owner **[@rajeshsani7-lab](https://github.com/rajeshsani7-lab)**.
 
 ---
 
-## ⚖️ Legal Notice
+## Legal Notice
 
-This emulator is **100% open source and legal** to build, use, and distribute.
-
-- The emulator **does not include any copyrighted game ROMs**.
-- You must supply your own legally-obtained `.nes` ROM files.
-- Dumping a cartridge you own is legal in most jurisdictions.
-
----
-
-## 🤝 Contributing
-
-Pull requests are welcome! Areas to improve:
-- Mapper 4 (MMC3) — Super Mario Bros 3, Contra Force
-- APU DMC channel (sample playback)
-- Save RAM persistence (.sav files)
-- Rewind feature
-- Netplay (two players over the internet)
-
----
-
-## 📜 License
-
-MIT License — free to use, modify, and distribute.
-
----
-
-Made with ❤️ and nostalgia
+This emulator is **100% open source** under the [MIT License](LICENSE) and **does not include any copyrighted game ROMs**. Users must supply their own legally-obtained `.nes` files.

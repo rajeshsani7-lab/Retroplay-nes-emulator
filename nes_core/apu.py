@@ -149,7 +149,7 @@ class PulseChannel:
             self.duty_pos = (self.duty_pos + 1) % 8
 
     def clock_half_frame(self):
-        self.sweep.clock(self.timer_period)
+        self.timer_period = self.sweep.clock(self.timer_period)
         self.length.clock()
 
     def clock_quarter_frame(self):
@@ -284,8 +284,23 @@ class APU:
         self.p1_phase   = 0.0
         self.p2_phase   = 0.0
         self.tri_phase  = 0.0
-        self.noise_table = np.random.uniform(-1.0, 1.0, 32768).astype(np.float32)
-        self.noise_idx  = 0
+        self.noi_phase  = 0.0
+        self.sample_accum = 0.0
+        self._lp_prev   = 0.0
+        self.master_volume = 1.0
+        self.lowpass_enabled = True
+        self.mute_p1 = False
+        self.mute_p2 = False
+        self.mute_tri = False
+        self.mute_noi = False
+        # Build authentic 15-bit NES LFSR noise table (32767 steps, zero-mean +/-1.0)
+        lfsr = 1
+        noise_bits = np.empty(32768, dtype=np.float32)
+        for i in range(32768):
+            noise_bits[i] = -1.0 if (lfsr & 1) else 1.0
+            fb = (lfsr & 1) ^ ((lfsr >> 1) & 1)
+            lfsr = (lfsr >> 1) | (fb << 14)
+        self.noise_table = noise_bits
 
     def write(self, addr, data):
         if addr == 0x4000: self.pulse1.write(0, data)
@@ -399,57 +414,78 @@ class APU:
         self.output_buffer.clear()
         return buf
 
-    def generate_frame_audio(self, count=735):
-        """Synthesize frame audio in one fast, vectorized pass."""
-        # Clock envelopes and length counters for frame
-        self._clock_quarter()
-        self._clock_half()
+    def generate_frame_audio(self, count=None):
+        """Synthesize one NES frame of audio with accurate 240Hz/120Hz frame-sequencer stepping."""
+        if count is None:
+            self.sample_accum += SAMPLE_RATE / 60.0988
+            count = int(self.sample_accum)
+            self.sample_accum -= count
 
-        t_steps = np.arange(count, dtype=np.float32)
         mixed = np.zeros(count, dtype=np.float32)
+        # Split frame into 4 quarter-frame segments (~183 samples each) for accurate 240Hz/120Hz timing
+        q_edges = (0, count // 4, count // 2, (3 * count) // 4, count)
 
-        # Pulse 1
-        p1 = self.pulse1
-        if p1.enabled and p1.length.active() and p1.timer_period >= 8 and not p1.sweep.muted(p1.timer_period):
-            p1_vol = (p1.envelope.output() / 15.0) * 0.35
-            if p1_vol > 0:
-                p1_freq = CPU_CLOCK / (16.0 * (p1.timer_period + 1))
-                step = p1_freq / SAMPLE_RATE
-                phases = (self.p1_phase + t_steps * step) % 1.0
-                self.p1_phase = (self.p1_phase + count * step) % 1.0
-                duty_thresh = (0.125, 0.25, 0.5, 0.75)[p1.duty]
-                mixed += np.where(phases < duty_thresh, p1_vol, -p1_vol)
+        for q in range(4):
+            self._clock_quarter()
+            if q == 1 or q == 3:
+                self._clock_half()
 
-        # Pulse 2
-        p2 = self.pulse2
-        if p2.enabled and p2.length.active() and p2.timer_period >= 8 and not p2.sweep.muted(p2.timer_period):
-            p2_vol = (p2.envelope.output() / 15.0) * 0.35
-            if p2_vol > 0:
-                p2_freq = CPU_CLOCK / (16.0 * (p2.timer_period + 1))
-                step = p2_freq / SAMPLE_RATE
-                phases = (self.p2_phase + t_steps * step) % 1.0
-                self.p2_phase = (self.p2_phase + count * step) % 1.0
-                duty_thresh = (0.125, 0.25, 0.5, 0.75)[p2.duty]
-                mixed += np.where(phases < duty_thresh, p2_vol, -p2_vol)
+            seg_len = q_edges[q + 1] - q_edges[q]
+            if seg_len <= 0:
+                continue
 
-        # Triangle
-        tri = self.triangle
-        if tri.enabled and tri.length.active() and tri.linear_counter > 0 and tri.timer_period >= 2:
-            tri_freq = CPU_CLOCK / (32.0 * (tri.timer_period + 1))
-            step = tri_freq / SAMPLE_RATE
-            phases = (self.tri_phase + t_steps * step) % 1.0
-            self.tri_phase = (self.tri_phase + count * step) % 1.0
-            tri_out = np.where(phases < 0.5, 4.0 * phases - 1.0, 3.0 - 4.0 * phases) * 0.35
-            mixed += tri_out
+            seg = mixed[q_edges[q] : q_edges[q + 1]]
+            t_steps = np.arange(seg_len, dtype=np.float32)
 
-        # Noise
-        noi = self.noise
-        if noi.enabled and noi.length.active():
-            noi_vol = (noi.envelope.output() / 15.0) * 0.2
-            if noi_vol > 0:
-                mixed += self.noise_table[self.noise_idx : self.noise_idx + count] * noi_vol
-                self.noise_idx = (self.noise_idx + count) % (len(self.noise_table) - count)
+            # Pulse 1
+            p1 = self.pulse1
+            if not self.mute_p1 and p1.enabled and p1.length.active() and p1.timer_period >= 8 and not p1.sweep.muted(p1.timer_period):
+                p1_vol = (p1.envelope.output() / 15.0) * 0.20
+                if p1_vol > 0:
+                    step = (CPU_CLOCK / (16.0 * (p1.timer_period + 1))) / SAMPLE_RATE
+                    phases = (self.p1_phase + t_steps * step) % 1.0
+                    self.p1_phase = (self.p1_phase + seg_len * step) % 1.0
+                    duty_thresh = (0.125, 0.25, 0.5, 0.75)[p1.duty]
+                    seg += np.where(phases < duty_thresh, p1_vol, -p1_vol)
 
-        # Scale to 16-bit integer PCM and output stereo (count, 2)
-        int_arr = (np.clip(mixed, -1.0, 1.0) * 24000).astype(np.int16)
+            # Pulse 2
+            p2 = self.pulse2
+            if not self.mute_p2 and p2.enabled and p2.length.active() and p2.timer_period >= 8 and not p2.sweep.muted(p2.timer_period):
+                p2_vol = (p2.envelope.output() / 15.0) * 0.20
+                if p2_vol > 0:
+                    step = (CPU_CLOCK / (16.0 * (p2.timer_period + 1))) / SAMPLE_RATE
+                    phases = (self.p2_phase + t_steps * step) % 1.0
+                    self.p2_phase = (self.p2_phase + seg_len * step) % 1.0
+                    duty_thresh = (0.125, 0.25, 0.5, 0.75)[p2.duty]
+                    seg += np.where(phases < duty_thresh, p2_vol, -p2_vol)
+
+            # Triangle
+            tri = self.triangle
+            if not self.mute_tri and tri.enabled and tri.length.active() and tri.linear_counter > 0 and tri.timer_period >= 2:
+                step = (CPU_CLOCK / (32.0 * (tri.timer_period + 1))) / SAMPLE_RATE
+                phases = (self.tri_phase + t_steps * step) % 1.0
+                self.tri_phase = (self.tri_phase + seg_len * step) % 1.0
+                seg += np.where(phases < 0.5, 4.0 * phases - 1.0, 3.0 - 4.0 * phases) * 0.25
+
+            # Noise (period-accurate LFSR pitch approximation)
+            noi = self.noise
+            if not self.mute_noi and noi.enabled and noi.length.active():
+                noi_vol = (noi.envelope.output() / 15.0) * 0.16
+                if noi_vol > 0:
+                    period = noi.timer_period if noi.timer_period > 0 else 4
+                    noi_step = (CPU_CLOCK / period) / SAMPLE_RATE
+                    indices = ((self.noi_phase + t_steps * noi_step).astype(np.int32)) & 32767
+                    self.noi_phase = (self.noi_phase + seg_len * noi_step) % 32768.0
+                    seg += self.noise_table[indices] * noi_vol
+
+        # Gentle 2-tap anti-aliasing low-pass filter continuous across frame boundaries
+        if self.lowpass_enabled and count > 1:
+            prev = np.empty_like(mixed)
+            prev[0] = self._lp_prev
+            prev[1:] = mixed[:-1]
+            self._lp_prev = float(mixed[-1])
+            mixed = 0.65 * mixed + 0.35 * prev
+
+        # Apply master volume and scale to 16-bit integer PCM stereo (count, 2)
+        int_arr = (np.clip(mixed * self.master_volume, -1.0, 1.0) * 28000).astype(np.int16)
         return np.column_stack((int_arr, int_arr))

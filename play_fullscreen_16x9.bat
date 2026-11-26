@@ -40,8 +40,8 @@ if %errorlevel%==0 (
     goto :found
 )
 
-echo ERROR: Python with numpy or pygame-ce was not found.
-echo Please run: %LOCALAPPDATA%\Programs\Python\Python312\python.exe -m pip install numpy pygame-ce
+echo ERROR: Python with numpy, pygame-ce, or numba was not found.
+echo Please run: pip install -r requirements.txt
 pause
 exit /b 1
 

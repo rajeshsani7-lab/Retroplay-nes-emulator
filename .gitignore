@@ -2,9 +2,12 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
-roms/
+/roms/*
+!/roms/README.md
 *.nes
 *.state
-saves/
+/saves/
+/screenshots/
+/settings.json
 .DS_Store
 Thumbs.db

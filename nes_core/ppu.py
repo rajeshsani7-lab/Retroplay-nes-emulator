@@ -7,6 +7,177 @@ The PPU produces a 256x240 pixel frame at ~60 FPS.
 
 import numpy as np
 
+try:
+    from numba import njit
+    HAS_NUMBA = True
+except ImportError:
+    HAS_NUMBA = False
+
+
+if HAS_NUMBA:
+    @njit(cache=True)
+    def _jit_render_scanline(scanline, render, ctrl, mask, status, v, t, fine_x,
+                             horiz_mirror, vram, oam, chr_rom, chr_off, idx_frame):
+        rendering = mask & 0x18
+        if rendering:
+            v = (v & ~0x041F) | (t & 0x041F)
+
+        if not render:
+            if (status & 0x40) or not rendering:
+                if rendering:
+                    if (v & 0x7000) != 0x7000:
+                        v += 0x1000
+                    else:
+                        v &= ~0x7000
+                        y = (v & 0x03E0) >> 5
+                        if y == 29:
+                            y = 0
+                            v ^= 0x0800
+                        elif y == 31:
+                            y = 0
+                        else:
+                            y += 1
+                        v = (v & ~0x03E0) | (y << 5)
+                return status, v
+            sy = oam[0] + 1
+            sp_size = 16 if (ctrl & 0x20) else 8
+            if scanline < sy or scanline >= sy + sp_size:
+                if (v & 0x7000) != 0x7000:
+                    v += 0x1000
+                else:
+                    v &= ~0x7000
+                    y = (v & 0x03E0) >> 5
+                    if y == 29:
+                        y = 0
+                        v ^= 0x0800
+                    elif y == 31:
+                        y = 0
+                    else:
+                        y += 1
+                    v = (v & ~0x03E0) | (y << 5)
+                return status, v
+
+        row_out = idx_frame[scanline]
+        for x_i in range(256):
+            row_out[x_i] = 0
+
+        chr_len = len(chr_rom)
+
+        # 1. Background
+        if mask & 0x08:
+            bg_table = (ctrl >> 4) & 1
+            fine_y = (v >> 12) & 0x07
+            coarse_y = (v >> 5) & 0x1F
+            if coarse_y >= 30:
+                coarse_y %= 30
+            coarse_y_32 = coarse_y * 32
+            attr_row = 960 + (coarse_y >> 2) * 8
+            shift_y = (coarse_y & 2) << 1
+            bg_base_addr = (bg_table << 12) | fine_y
+            nt_y = (v >> 11) & 1
+            nt_x = (v >> 10) & 1
+            coarse_x = v & 0x1F
+
+            sx_pos = -fine_x
+            for _ in range(33):
+                table_idx = nt_y if horiz_mirror else nt_x
+                vram_base = table_idx * 1024
+                tile_id = vram[vram_base + coarse_y_32 + coarse_x]
+                attr_byte = vram[vram_base + attr_row + (coarse_x >> 2)]
+                pal_idx = (attr_byte >> (shift_y | (coarse_x & 2))) & 3
+                pal_base = pal_idx << 2
+
+                p_addr = bg_base_addr | (tile_id << 4)
+                c_addr = chr_off[p_addr >> 10] + (p_addr & 0x3FF)
+                p0 = chr_rom[c_addr] if c_addr < chr_len else 0
+                p1 = chr_rom[c_addr + 8] if (c_addr + 8) < chr_len else 0
+
+                for bit_i in range(8):
+                    px_x = sx_pos + bit_i
+                    if 0 <= px_x < 256:
+                        bit = 7 - bit_i
+                        px = (((p1 >> bit) & 1) << 1) | ((p0 >> bit) & 1)
+                        if px != 0:
+                            row_out[px_x] = pal_base | px
+
+                sx_pos += 8
+                if coarse_x == 31:
+                    coarse_x = 0
+                    nt_x ^= 1
+                else:
+                    coarse_x += 1
+
+            if not (mask & 0x02):
+                for x_i in range(8):
+                    row_out[x_i] = 0
+
+        # 2. Sprites & Sprite 0 hit
+        if mask & 0x10:
+            sprite_size = 16 if (ctrl & 0x20) else 8
+            sp_clip_left = not (mask & 0x04)
+            sp_table_8 = (ctrl >> 3) & 1
+
+            for i in range(63, -1, -1):
+                base = i * 4
+                sy = oam[base] + 1
+                diff = scanline - sy
+                if 0 <= diff < sprite_size:
+                    tile = oam[base + 1]
+                    attr = oam[base + 2]
+                    sx = oam[base + 3]
+
+                    flip_v = attr & 0x80
+                    flip_h = attr & 0x40
+                    priority = attr & 0x20
+                    pal_base = ((attr & 3) + 4) << 2
+
+                    row = sprite_size - 1 - diff if flip_v else diff
+                    if sprite_size == 8:
+                        addr = (sp_table_8 << 12) | (tile << 4) | row
+                    else:
+                        table = tile & 1
+                        t_id = tile & ~1
+                        if row >= 8:
+                            t_id += 1
+                            row -= 8
+                        addr = (table << 12) | (t_id << 4) | row
+
+                    c_addr = chr_off[addr >> 10] + (addr & 0x3FF)
+                    p0 = chr_rom[c_addr] if c_addr < chr_len else 0
+                    p1 = chr_rom[c_addr + 8] if (c_addr + 8) < chr_len else 0
+
+                    for px in range(8):
+                        col_x = sx + px
+                        if col_x < 256:
+                            if sp_clip_left and col_x < 8:
+                                continue
+                            bit = px if flip_h else (7 - px)
+                            p_val = (((p1 >> bit) & 1) << 1) | ((p0 >> bit) & 1)
+                            if p_val != 0:
+                                bg_val = row_out[col_x]
+                                if i == 0 and bg_val != 0 and col_x < 255:
+                                    status |= 0x40
+                                if render and (not priority or bg_val == 0):
+                                    row_out[col_x] = pal_base | p_val
+
+        # Increment vertical scroll
+        if rendering:
+            if (v & 0x7000) != 0x7000:
+                v += 0x1000
+            else:
+                v &= ~0x7000
+                y = (v & 0x03E0) >> 5
+                if y == 29:
+                    y = 0
+                    v ^= 0x0800
+                elif y == 31:
+                    y = 0
+                else:
+                    y += 1
+                v = (v & ~0x03E0) | (y << 5)
+
+        return status, v
+
 # NES system palette — 64 colors (RGB)
 NES_PALETTE = [
     (84,  84,  84), (0,   30, 116), (8,   16, 144), (48,   0, 136),
@@ -27,33 +198,30 @@ NES_PALETTE = [
     (160,214, 228), (160,162, 160), (0,   0,   0),  (0,   0,   0),
 ]
 
-# Precomputed Lookup Tables for instantaneous scanline unpacking
-BG_LOOKUP = [None] * (4 * 65536)
-for _pal in range(4):
-    _base_pal = _pal << 2
-    for _p0 in range(256):
-        for _p1 in range(256):
-            _b = bytearray(8)
-            for _i in range(8):
-                _bit = 7 - _i
-                _px = (((_p1 >> _bit) & 1) << 1) | ((_p0 >> _bit) & 1)
-                _b[_i] = (_base_pal | _px) if _px else 0
-            BG_LOOKUP[(_pal << 16) | (_p0 << 8) | _p1] = bytes(_b)
+# Precomputed Lookup Tables for instantaneous scanline unpacking (built via NumPy)
+def _build_luts():
+    p0 = np.arange(256, dtype=np.uint8)[:, None, None]
+    p1 = np.arange(256, dtype=np.uint8)[None, :, None]
+    bits = np.arange(7, -1, -1, dtype=np.uint8)[None, None, :]
+    px = (((p1 >> bits) & 1) << 1) | ((p0 >> bits) & 1)  # shape (256, 256, 8)
+    px_flat = px.reshape(65536, 8)
 
-SPRITE_LOOKUP = [None] * 65536
-SPRITE_LOOKUP_FLIP = [None] * 65536
-for _p0 in range(256):
-    for _p1 in range(256):
-        _b = bytearray(8)
-        _bf = bytearray(8)
-        for _i in range(8):
-            _bit = 7 - _i
-            _px = (((_p1 >> _bit) & 1) << 1) | ((_p0 >> _bit) & 1)
-            _b[_i] = _px
-            _bf[7 - _i] = _px
-        _key = (_p0 << 8) | _p1
-        SPRITE_LOOKUP[_key] = bytes(_b)
-        SPRITE_LOOKUP_FLIP[_key] = bytes(_bf)
+    bg_lut = [None] * (4 * 65536)
+    nz = px_flat != 0
+    for pal in range(4):
+        arr = np.where(nz, px_flat | (pal << 2), 0).astype(np.uint8)
+        raw = arr.tobytes()
+        base = pal << 16
+        for k in range(65536):
+            bg_lut[base + k] = raw[k * 8 : (k + 1) * 8]
+
+    raw_sp = px_flat.astype(np.uint8).tobytes()
+    raw_spf = px_flat[:, ::-1].astype(np.uint8).tobytes()
+    sp_lut = [raw_sp[k * 8 : (k + 1) * 8] for k in range(65536)]
+    sp_lut_flip = [raw_spf[k * 8 : (k + 1) * 8] for k in range(65536)]
+    return bg_lut, sp_lut, sp_lut_flip
+
+BG_LOOKUP, SPRITE_LOOKUP, SPRITE_LOOKUP_FLIP = _build_luts()
 
 
 class PPU:
@@ -91,8 +259,21 @@ class PPU:
 
         # Frame buffer — RGB pixels
         self.frame = np.zeros((self.SCREEN_H, self.SCREEN_W, 3), dtype=np.uint8)
+        self._idx_frame = np.zeros((self.SCREEN_H, self.SCREEN_W), dtype=np.uint8)
         self.frame_complete = False
         self.nmi_triggered  = False
+
+        # Reusable scanline buffer (272 bytes: 8-byte left pad + 256 visible + 8-byte right pad)
+        self._line_buf = bytearray(272)
+        self._line_np  = np.frombuffer(self._line_buf, dtype=np.uint8)[8:264]
+        self._zero_256 = b'\x00' * 256
+        self._zero_8   = b'\x00' * 8
+        self._oam_bins = [[] for _ in range(240)]
+        self._oam_bins_key = None
+        self._vram_np = np.frombuffer(self.vram, dtype=np.uint8)
+        self._oam_np  = np.frombuffer(self.oam, dtype=np.uint8)
+        self._chr_np  = None
+        self._chr_off_np = np.arange(8, dtype=np.int32) * 1024
 
         # Background shift registers
         self.bg_next_tile_id    = 0
@@ -219,111 +400,159 @@ class PPU:
         return r, g, b
 
     # -------------------------------------------------------------------------
-    # Fast Scanline Renderer (Vectorized & Precomputed LUT)
+    # Fast Scanline Renderer (Loopy-accurate + Precomputed LUT)
     # -------------------------------------------------------------------------
     def render_scanline(self, scanline, render=True):
         if scanline < 0 or scanline >= 240:
             return
 
+        if HAS_NUMBA:
+            cart = self.bus.cart
+            if self._chr_np is None:
+                self._chr_np = np.frombuffer(cart.chr_rom, dtype=np.uint8)
+            off = cart.mapper.chr_offsets
+            off_np = self._chr_off_np
+            for k in range(8):
+                off_np[k] = off[k]
+            self.status, self.v = _jit_render_scanline(
+                scanline, render, self.ctrl, self.mask, self.status, self.v, self.t, self.x,
+                cart.mirroring == 'horizontal', self._vram_np, self._oam_np, self._chr_np, off_np, self._idx_frame
+            )
+            if render and scanline == 239:
+                if self.pal_dirty:
+                    self.pal_rgb_arr[:] = [NES_PALETTE[self.palette[i] & 0x3F] for i in range(32)]
+                    self.pal_dirty = False
+                np.take(self.pal_rgb_arr, self._idx_frame, axis=0, out=self.frame)
+            return
+
+        mask = self.mask
+        rendering = mask & 0x18
+
         if not render:
-            # If skipping display, only evaluate Sprite 0 hit if it hasn't fired yet
-            if (self.status & 0x40) or not (self.mask & 0x18):
+            if rendering:
+                self.v = (self.v & ~0x041F) | (self.t & 0x041F)
+            # Only evaluate Sprite 0 hit if it hasn't fired yet
+            if (self.status & 0x40) or not rendering:
+                if rendering:
+                    self._increment_scroll_y()
                 return
             sy = self.oam[0] + 1
             sp_size = 16 if (self.ctrl & 0x20) else 8
             if not (0 <= scanline - sy < sp_size):
+                self._increment_scroll_y()
                 return
 
-        show_bg = bool(self.mask & 0x08)
-        show_sp = bool(self.mask & 0x10)
+        if rendering:
+            # Copy horizontal scroll bits from t -> v at start of scanline
+            self.v = (self.v & ~0x041F) | (self.t & 0x041F)
 
-        line_buf = bytearray(256)
+        show_bg = bool(mask & 0x08)
+        show_sp = bool(mask & 0x10)
 
-        # 1. Background
+        line_buf = self._line_buf
+        line_buf[8:264] = self._zero_256
+
+        # 1. Background (using Loopy v register for accurate mid-frame splits)
         if show_bg:
+            v = self.v
             bg_table = (self.ctrl >> 4) & 1
             fine_x = self.x
-            base_nt_x = self.ctrl & 1
-            base_nt_y = (self.ctrl >> 1) & 1
-
-            total_y = (base_nt_y * 240 + self.scroll_y + scanline) % 480
-            nt_y = total_y // 240
-            fine_y = total_y % 8
-            coarse_y = (total_y % 240) // 8
+            fine_y = (v >> 12) & 0x07
+            coarse_y = (v >> 5) & 0x1F
+            if coarse_y >= 30:
+                coarse_y %= 30
             coarse_y_32 = coarse_y * 32
-            attr_row = 960 + (coarse_y // 4) * 8
+            attr_row = 960 + (coarse_y >> 2) * 8
             shift_y = (coarse_y & 2) << 1
             bg_base_addr = (bg_table << 12) | fine_y
 
-            total_base_x = base_nt_x * 256 + self.scroll_x
+            nt_y = (v >> 11) & 1
+            nt_x = (v >> 10) & 1
+            coarse_x = v & 0x1F
+
             vram = self.vram
-            mirror = self.bus.cart.mirroring
-            chr_rom = self.bus.cart.chr_rom
+            horiz_mirror = (self.bus.cart.mirroring == 'horizontal')
+            cart = self.bus.cart
+            chr_rom = cart.chr_rom
             chr_len = len(chr_rom)
+            chr_off = cart.mapper.chr_offsets
+            bg_lut = BG_LOOKUP
 
-            for tile_col in range(33):
-                cur_x = total_base_x + tile_col * 8
-                nt_x = (cur_x // 256) & 1
-                coarse_x = (cur_x % 256) // 8
-
-                nt_id = (nt_y << 1) | nt_x
-                table_idx = (nt_id >> 1) & 1 if mirror == 'horizontal' else (nt_id & 1)
+            sx_pos = 8 - fine_x
+            for _ in range(33):
+                if horiz_mirror:
+                    table_idx = nt_y
+                else:
+                    table_idx = nt_x
                 vram_base = table_idx * 1024
 
                 tile_id = vram[vram_base + coarse_y_32 + coarse_x]
-                attr_byte = vram[vram_base + attr_row + (coarse_x // 4)]
+                attr_byte = vram[vram_base + attr_row + (coarse_x >> 2)]
                 pal_idx = (attr_byte >> (shift_y | (coarse_x & 2))) & 3
 
                 p_addr = bg_base_addr | (tile_id << 4)
-                if p_addr + 8 < chr_len:
-                    p0 = chr_rom[p_addr]
-                    p1 = chr_rom[p_addr + 8]
+                c_addr = chr_off[p_addr >> 10] + (p_addr & 0x3FF)
+                if c_addr + 8 < chr_len:
+                    p0 = chr_rom[c_addr]
+                    p1 = chr_rom[c_addr + 8]
                 else:
-                    p0 = chr_rom[p_addr] if p_addr < chr_len else 0
-                    p1 = chr_rom[p_addr + 8] if (p_addr + 8) < chr_len else 0
+                    p0 = chr_rom[c_addr] if c_addr < chr_len else 0
+                    p1 = chr_rom[c_addr + 8] if (c_addr + 8) < chr_len else 0
 
-                key = (pal_idx << 16) | (p0 << 8) | p1
-                pixels = BG_LOOKUP[key]
+                line_buf[sx_pos : sx_pos + 8] = bg_lut[(pal_idx << 16) | (p0 << 8) | p1]
+                sx_pos += 8
 
-                sx_start = tile_col * 8 - fine_x
-                if 0 <= sx_start <= 248:
-                    line_buf[sx_start:sx_start + 8] = pixels
+                if coarse_x == 31:
+                    coarse_x = 0
+                    nt_x ^= 1
                 else:
-                    s_in = max(0, -sx_start)
-                    e_in = min(8, 256 - sx_start)
-                    if s_in < e_in:
-                        d_start = max(0, sx_start)
-                        line_buf[d_start:d_start + (e_in - s_in)] = pixels[s_in:e_in]
+                    coarse_x += 1
 
             # PPUMASK left 8 pixels clipping
-            if not (self.mask & 0x02):
-                line_buf[0:8] = b'\x00' * 8
+            if not (mask & 0x02):
+                line_buf[8:16] = self._zero_8
 
-        # 2. Sprites & Sprite 0 hit
+        # 2. Sprites & Sprite 0 hit (pre-binned by scanline)
         if show_sp:
             sprite_size = 16 if (self.ctrl & 0x20) else 8
-            chr_rom = self.bus.cart.chr_rom
-            chr_len = len(chr_rom)
-            sp_clip_left = not (self.mask & 0x04)
+            oam = self.oam
+            if scanline == 0 or self._oam_bins_key != sprite_size:
+                bins = self._oam_bins
+                for b in bins:
+                    b.clear()
+                for i in range(63, -1, -1):
+                    sy = oam[i * 4] + 1
+                    if sy < 240:
+                        end_y = min(240, sy + sprite_size)
+                        for y_line in range(sy, end_y):
+                            bins[y_line].append(i)
+                self._oam_bins_key = sprite_size
 
-            # Evaluate OAM backwards (lowest index sprite wins priority)
-            for i in range(63, -1, -1):
-                sy = self.oam[i * 4 + 0] + 1
-                diff = scanline - sy
-                if 0 <= diff < sprite_size:
-                    tile = self.oam[i * 4 + 1]
-                    attr = self.oam[i * 4 + 2]
-                    sx = self.oam[i * 4 + 3]
+            line_sprites = self._oam_bins[scanline]
+            if line_sprites:
+                cart = self.bus.cart
+                chr_rom = cart.chr_rom
+                chr_len = len(chr_rom)
+                chr_off = cart.mapper.chr_offsets
+                sp_clip_left = not (mask & 0x04)
+                sp_table_8 = (self.ctrl >> 3) & 1
 
-                    flip_v = bool(attr & 0x80)
-                    flip_h = bool(attr & 0x40)
-                    priority = bool(attr & 0x20)
+                for i in line_sprites:
+                    base = i * 4
+                    sy = oam[base] + 1
+                    diff = scanline - sy
+                    tile = oam[base + 1]
+                    attr = oam[base + 2]
+                    sx = oam[base + 3]
+
+                    flip_v = attr & 0x80
+                    flip_h = attr & 0x40
+                    priority = attr & 0x20
                     pal_base = ((attr & 3) + 4) << 2
 
                     row = sprite_size - 1 - diff if flip_v else diff
                     if sprite_size == 8:
-                        table = (self.ctrl >> 3) & 1
-                        addr = (table << 12) | (tile << 4) | row
+                        addr = (sp_table_8 << 12) | (tile << 4) | row
                     else:
                         table = tile & 1
                         t_id = tile & ~1
@@ -332,35 +561,43 @@ class PPU:
                             row -= 8
                         addr = (table << 12) | (t_id << 4) | row
 
-                    if addr + 8 < chr_len:
-                        p0 = chr_rom[addr]
-                        p1 = chr_rom[addr + 8]
+                    c_addr = chr_off[addr >> 10] + (addr & 0x3FF)
+                    if c_addr + 8 < chr_len:
+                        p0 = chr_rom[c_addr]
+                        p1 = chr_rom[c_addr + 8]
                     else:
-                        p0 = chr_rom[addr] if addr < chr_len else 0
-                        p1 = chr_rom[addr + 8] if (addr + 8) < chr_len else 0
+                        p0 = chr_rom[c_addr] if c_addr < chr_len else 0
+                        p1 = chr_rom[c_addr + 8] if (c_addr + 8) < chr_len else 0
 
                     key = (p0 << 8) | p1
                     pixels = SPRITE_LOOKUP_FLIP[key] if flip_h else SPRITE_LOOKUP[key]
 
                     for px in range(8):
                         col_x = sx + px
-                        if 0 <= col_x < 256:
+                        if col_x < 256:
                             if sp_clip_left and col_x < 8:
                                 continue
                             p_val = pixels[px]
                             if p_val != 0:
-                                bg_val = line_buf[col_x]
+                                buf_idx = 8 + col_x
+                                bg_val = line_buf[buf_idx]
                                 if i == 0 and bg_val != 0 and col_x < 255:
                                     self.status |= 0x40  # Sprite 0 hit!
                                 if render and (not priority or bg_val == 0):
-                                    line_buf[col_x] = pal_base | p_val
+                                    line_buf[buf_idx] = pal_base | p_val
 
-        # 3. Composite line into RGB frame buffer
+        # Increment vertical scroll for next scanline
+        if rendering:
+            self._increment_scroll_y()
+
+        # 3. Store palette indices for scanline; convert whole frame at scanline 239
         if render:
-            if self.pal_dirty:
-                self.pal_rgb_arr[:] = [NES_PALETTE[self.palette[i] & 0x3F] for i in range(32)]
-                self.pal_dirty = False
-            self.frame[scanline] = self.pal_rgb_arr[np.frombuffer(line_buf, dtype=np.uint8)]
+            self._idx_frame[scanline] = self._line_np
+            if scanline == 239:
+                if self.pal_dirty:
+                    self.pal_rgb_arr[:] = [NES_PALETTE[self.palette[i] & 0x3F] for i in range(32)]
+                    self.pal_dirty = False
+                np.take(self.pal_rgb_arr, self._idx_frame, axis=0, out=self.frame)
 
     # -------------------------------------------------------------------------
     # Clock — called once per PPU cycle
