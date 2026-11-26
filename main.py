@@ -196,15 +196,8 @@ class NESEmulator:
         self.scale = v["scale"]
         self.fullscreen = v["fullscreen"]
         self.frameskip = v["frameskip"]
-        aspect = v.get("aspect_mode", "4:3")
-        base_h = SCREEN_H * self.scale
-        if aspect == "4:3":
-            self.win_w = int(round(base_h * 4.0 / 3.0))
-        elif aspect == "16:9":
-            self.win_w = int(round(base_h * 16.0 / 9.0))
-        else:
-            self.win_w = SCREEN_W * self.scale
-        self.win_h = base_h + (40 if self.debug else 0)
+        self.win_w = SCREEN_W * self.scale
+        self.win_h = SCREEN_H * self.scale + (40 if self.debug else 0)
         if self.fullscreen:
             info = pygame.display.Info()
             self.screen = pygame.display.set_mode((info.current_w, info.current_h), pygame.FULLSCREEN | pygame.DOUBLEBUF)
@@ -363,37 +356,37 @@ class NESEmulator:
         self.screen.blit(self._scanline_surf, (offset_x, offset_y))
 
     def _render_frame(self):
-        """Blit the PPU frame buffer onto the pygame window with overscan, true 4:3/1:1/16:9 aspect & scanlines."""
+        """Blit the PPU frame buffer onto the pygame window with overscan, aspect & scanline support."""
         surf = pygame.image.frombuffer(self.bus.ppu.frame.data, (SCREEN_W, SCREEN_H), 'RGB')
-        if self.cfg["video"].get("overscan_crop", True):
+        if self.cfg["video"].get("overscan_crop", False):
             surf = surf.subsurface((0, 8, SCREEN_W, SCREEN_H - 16))
         src_w, src_h = surf.get_size()
 
-        win_w, win_h = self.screen.get_size()
-        game_h = win_h - (40 if (self.debug and not self.fullscreen) else 0)
-        aspect = self.cfg["video"].get("aspect_mode", "4:3")
-
-        if aspect == "16:9":
-            dest_w, dest_h = win_w, game_h
-        elif aspect == "1:1":
-            int_s = max(1, min(win_w // src_w, game_h // src_h))
-            dest_w, dest_h = src_w * int_s, src_h * int_s
-        else:
-            # Classic 4:3 CRT TV aspect ratio
-            if win_w / max(1, game_h) >= 4.0 / 3.0:
-                dest_h = game_h
-                dest_w = int(round(dest_h * 4.0 / 3.0))
+        if self.fullscreen:
+            win_w, win_h = self.screen.get_size()
+            aspect = self.cfg["video"]["aspect_mode"]
+            if aspect == "16:9":
+                scaled = self._scale_into_cache(surf, win_w, win_h)
+                self.screen.blit(scaled, (0, 0))
+                self._apply_scanlines(win_w, win_h, 0, 0)
             else:
-                dest_w = win_w
-                dest_h = int(round(dest_w * 3.0 / 4.0))
-
-        offset_x = (win_w - dest_w) // 2
-        offset_y = (game_h - dest_h) // 2
-        if offset_x > 0 or offset_y > 0:
-            self.screen.fill((0, 0, 0))
-        scaled = self._scale_into_cache(surf, dest_w, dest_h)
-        self.screen.blit(scaled, (offset_x, offset_y))
-        self._apply_scanlines(dest_w, dest_h, offset_x, offset_y)
+                if aspect == "1:1":
+                    int_s = max(1, min(win_w // src_w, win_h // src_h))
+                    dest_w, dest_h = src_w * int_s, src_h * int_s
+                else:
+                    scale = min(win_w / src_w, win_h / src_h)
+                    dest_w, dest_h = int(src_w * scale), int(src_h * scale)
+                offset_x = (win_w - dest_w) // 2
+                offset_y = (win_h - dest_h) // 2
+                self.screen.fill((0, 0, 0))
+                scaled = self._scale_into_cache(surf, dest_w, dest_h)
+                self.screen.blit(scaled, (offset_x, offset_y))
+                self._apply_scanlines(dest_w, dest_h, offset_x, offset_y)
+        else:
+            dest_w, dest_h = SCREEN_W * self.scale, SCREEN_H * self.scale
+            scaled = self._scale_into_cache(surf, dest_w, dest_h)
+            self.screen.blit(scaled, (0, 0))
+            self._apply_scanlines(dest_w, dest_h, 0, 0)
 
     # ─────────────────────────────────────────────────────────────────────────
     def _play_audio(self):
