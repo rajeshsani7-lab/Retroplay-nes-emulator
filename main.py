@@ -82,9 +82,9 @@ class NESEmulator:
             except Exception:
                 self._winmm = None
 
-        # Init pygame mixer with 512-sample buffer (~11.6ms < 16.6ms frame) + seamless PCM staging
+        # Init pygame mixer with 1024-sample buffer (~23.2ms) + 2-frame queued chunks for crackle-free audio
         try:
-            pygame.mixer.pre_init(frequency=44100, size=-16, channels=2, buffer=512)
+            pygame.mixer.pre_init(frequency=44100, size=-16, channels=2, buffer=1024)
             pygame.mixer.init()
         except Exception as e:
             print(f"[Audio] Mixer init warning: {e}")
@@ -96,11 +96,14 @@ class NESEmulator:
             self._load_rom(rom_path)
 
         self._apply_video_mode()
-        self.nes_surface = pygame.Surface((SCREEN_W, SCREEN_H))
+        self._src_surf = None
+        self._mid_surf = None
+        self._mid_size = (0, 0)
         self._scaled_surf = None
         self._scaled_size = (0, 0)
         self._scanline_surf = None
         self._scanline_key = None
+        self._bg_cleared_key = None
         self._latched_p1 = 0
         self._latched_p2 = 0
 
@@ -205,8 +208,11 @@ class NESEmulator:
             self.screen = pygame.display.set_mode((self.win_w, self.win_h), pygame.DOUBLEBUF)
         title_suffix = f" — {os.path.basename(self.rom_path)}" if self.rom_path else ""
         pygame.display.set_caption(f"{WINDOW_TITLE}{title_suffix}")
+        self._src_surf = None
+        self._mid_surf = None
         self._scaled_surf = None
         self._scanline_surf = None
+        self._bg_cleared_key = None
 
     def _apply_audio_settings(self):
         if not self.bus:
@@ -253,14 +259,14 @@ class NESEmulator:
             sub_steps = self.cfg["emulation"]["fast_forward_speed"] if ff_active else 1
 
             if not self.paused:
-                behind = time.perf_counter() > next_frame_time
+                behind = (time.perf_counter() - next_frame_time) > (target_frame_time * 0.75)
                 for s in range(sub_steps):
                     self.frame_count += 1
                     should_render = (s == sub_steps - 1)
                     if self.frameskip > 0 and should_render:
                         should_render = (self.frame_count % (self.frameskip + 1) == 0)
                     elif behind and should_render and (self.frame_count % 2 == 1):
-                        # Auto-frameskip when behind 60Hz so audio & physics stay at full speed
+                        # Auto-frameskip only when genuinely >12ms behind 60Hz
                         should_render = False
 
                     self.bus.step_frame(render=should_render)
@@ -282,7 +288,7 @@ class NESEmulator:
                 self._fps_ema = self._fps_ema * 0.9 + inst_fps * 0.1
 
             next_frame_time += target_frame_time
-            if cur - next_frame_time > target_frame_time * 3:
+            if cur - next_frame_time > target_frame_time * 2:
                 next_frame_time = cur
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -332,7 +338,7 @@ class NESEmulator:
     # ─────────────────────────────────────────────────────────────────────────
     def _scale_into_cache(self, surf, dest_w, dest_h):
         if self._scaled_size != (dest_w, dest_h) or self._scaled_surf is None:
-            self._scaled_surf = pygame.Surface((dest_w, dest_h), 0, surf)
+            self._scaled_surf = pygame.Surface((dest_w, dest_h)).convert(self.screen)
             self._scaled_size = (dest_w, dest_h)
         if self.cfg["video"]["smooth_scaling"]:
             pygame.transform.smoothscale(surf, (dest_w, dest_h), self._scaled_surf)
@@ -340,26 +346,37 @@ class NESEmulator:
             pygame.transform.scale(surf, (dest_w, dest_h), self._scaled_surf)
         return self._scaled_surf
 
-    def _apply_scanlines(self, dest_w, dest_h, offset_x, offset_y):
+    def _apply_scanlines_prescale(self, surf):
+        """Apply CRT scanlines at 256x(2*H) before scaling (4x faster than full-screen alpha)."""
         level = self.cfg["video"]["scanlines"]
         if level == 0:
-            return
+            return surf
+        src_w, src_h = surf.get_size()
+        mid_h = src_h * 2
+        if self._mid_size != (src_w, mid_h) or self._mid_surf is None:
+            self._mid_surf = pygame.Surface((src_w, mid_h)).convert(self.screen)
+            self._mid_size = (src_w, mid_h)
         alpha = 55 if level == 1 else 115
-        key = (dest_w, dest_h, alpha)
+        key = (src_w, mid_h, alpha)
         if self._scanline_key != key or self._scanline_surf is None:
-            sl = pygame.Surface((dest_w, dest_h), pygame.SRCALPHA)
-            step = max(2, dest_h // SCREEN_H)
-            for y in range(0, dest_h, step):
-                pygame.draw.line(sl, (0, 0, 0, alpha), (0, y), (dest_w, y))
+            sl = pygame.Surface((src_w, mid_h), pygame.SRCALPHA)
+            for y in range(0, mid_h, 2):
+                pygame.draw.line(sl, (0, 0, 0, alpha), (0, y), (src_w, y))
             self._scanline_surf = sl
             self._scanline_key = key
-        self.screen.blit(self._scanline_surf, (offset_x, offset_y))
+        pygame.transform.scale(surf, (src_w, mid_h), self._mid_surf)
+        self._mid_surf.blit(self._scanline_surf, (0, 0))
+        return self._mid_surf
 
     def _render_frame(self):
-        """Blit the PPU frame buffer onto the pygame window with overscan, aspect & scanline support."""
-        surf = pygame.image.frombuffer(self.bus.ppu.frame.data, (SCREEN_W, SCREEN_H), 'RGB')
+        """Blit the PPU frame buffer onto the pygame window in native 32-bit pixel format."""
+        if self._src_surf is None:
+            self._src_surf = pygame.Surface((SCREEN_W, SCREEN_H)).convert(self.screen)
+        pygame.surfarray.blit_array(self._src_surf, self.bus.ppu.frame.swapaxes(0, 1))
+        surf = self._src_surf
         if self.cfg["video"].get("overscan_crop", False):
             surf = surf.subsurface((0, 8, SCREEN_W, SCREEN_H - 16))
+        surf = self._apply_scanlines_prescale(surf)
         src_w, src_h = surf.get_size()
 
         if self.fullscreen:
@@ -368,29 +385,31 @@ class NESEmulator:
             if aspect == "16:9":
                 scaled = self._scale_into_cache(surf, win_w, win_h)
                 self.screen.blit(scaled, (0, 0))
-                self._apply_scanlines(win_w, win_h, 0, 0)
             else:
                 if aspect == "1:1":
-                    int_s = max(1, min(win_w // src_w, win_h // src_h))
-                    dest_w, dest_h = src_w * int_s, src_h * int_s
+                    int_s = max(1, min(win_w // SCREEN_W, win_h // (SCREEN_H - 16 if self.cfg["video"].get("overscan_crop", False) else SCREEN_H)))
+                    dest_w = SCREEN_W * int_s
+                    dest_h = (SCREEN_H - 16 if self.cfg["video"].get("overscan_crop", False) else SCREEN_H) * int_s
                 else:
-                    scale = min(win_w / src_w, win_h / src_h)
-                    dest_w, dest_h = int(src_w * scale), int(src_h * scale)
+                    base_h = SCREEN_H - 16 if self.cfg["video"].get("overscan_crop", False) else SCREEN_H
+                    scale = min(win_w / SCREEN_W, win_h / base_h)
+                    dest_w, dest_h = int(SCREEN_W * scale), int(base_h * scale)
                 offset_x = (win_w - dest_w) // 2
                 offset_y = (win_h - dest_h) // 2
-                self.screen.fill((0, 0, 0))
+                clear_key = (win_w, win_h, dest_w, dest_h)
+                if self._bg_cleared_key != clear_key or self.ui.mode is not None:
+                    self.screen.fill((0, 0, 0))
+                    self._bg_cleared_key = clear_key
                 scaled = self._scale_into_cache(surf, dest_w, dest_h)
                 self.screen.blit(scaled, (offset_x, offset_y))
-                self._apply_scanlines(dest_w, dest_h, offset_x, offset_y)
         else:
             dest_w, dest_h = SCREEN_W * self.scale, SCREEN_H * self.scale
             scaled = self._scale_into_cache(surf, dest_w, dest_h)
             self.screen.blit(scaled, (0, 0))
-            self._apply_scanlines(dest_w, dest_h, 0, 0)
 
     # ─────────────────────────────────────────────────────────────────────────
     def _play_audio(self):
-        """Synthesize frame audio and stream seamlessly without dropping chunks."""
+        """Synthesize frame audio and stream in 2-frame (~33ms) chunks to eliminate underrun clicks."""
         if not pygame.mixer.get_init() or not self.cfg["audio"]["enabled"]:
             return
         audio_data = self.bus.apu.generate_frame_audio(count=None)
@@ -398,7 +417,8 @@ class NESEmulator:
             self._audio_buf.append(audio_data)
             self._audio_samples += len(audio_data)
 
-        while self._audio_samples > 2940 and len(self._audio_buf) > 1:
+        # Cap backlog at ~100ms (4410 samples) so latency stays tight even after stalls
+        while self._audio_samples > 4410 and len(self._audio_buf) > 2:
             dropped = self._audio_buf.pop(0)
             self._audio_samples -= len(dropped)
 
@@ -412,17 +432,21 @@ class NESEmulator:
             return
 
         try:
-            need_play = not self.audio_channel.get_busy()
-            need_queue = (not need_play) and (self.audio_channel.get_queue() is None)
-            if need_play or need_queue:
+            is_busy = self.audio_channel.get_busy()
+            q_empty = is_busy and (self.audio_channel.get_queue() is None)
+            if not is_busy:
+                # Prime with ~3 frames (~50ms) when starting from idle so queue always stays ahead
+                if self._audio_samples < 2100:
+                    return
                 merged = self._audio_buf[0] if len(self._audio_buf) == 1 else np.vstack(self._audio_buf)
                 self._audio_buf.clear()
                 self._audio_samples = 0
-                sound = pygame.sndarray.make_sound(merged)
-                if need_play:
-                    self.audio_channel.play(sound)
-                else:
-                    self.audio_channel.queue(sound)
+                self.audio_channel.play(pygame.sndarray.make_sound(merged))
+            elif q_empty and self._audio_samples >= 1400:
+                merged = self._audio_buf[0] if len(self._audio_buf) == 1 else np.vstack(self._audio_buf)
+                self._audio_buf.clear()
+                self._audio_samples = 0
+                self.audio_channel.queue(pygame.sndarray.make_sound(merged))
         except Exception:
             pass
 
