@@ -48,36 +48,31 @@ Created and maintained by **Rajesh Sani ([@rajeshsani7-lab](https://github.com/r
 
 ## Quick Start
 
-### 1. Clone & install dependencies
+## How to Play (3 Easy Steps)
+
+### Option A — No Coding / One-Click (Recommended)
+1. **Download**: On GitHub, click **Code → Download ZIP** (or grab the latest `RetroPlay-NES-Windows.zip` from **Releases**), and extract the folder.
+2. **Add your `.nes` games**: Copy your legally-owned `.nes` ROM files into the `roms/` folder:
+   ```text
+   Retroplay-nes-emulator/
+     roms/
+       contra.nes
+       mario3.nes
+   ```
+3. **Play**:
+   - **Windows**: Double-click **`play.bat`** (automatically installs dependencies on first run and opens the Game Library; or double-click `play_fullscreen_16x9.bat` for fullscreen).
+   - **Mac / Linux**: Run `./play.sh` (or `chmod +x play.sh && ./play.sh`).
+   - Plug in any **USB / Bluetooth controller** or play with **Arrow Keys + `Z` (A) / `X` (B) / `Enter` (Start)**.
+
+### Option B — Developer Setup (`git clone`)
 
 ```bash
 git clone https://github.com/rajeshsani7-lab/Retroplay-nes-emulator.git
 cd Retroplay-nes-emulator
 pip install -r requirements.txt
+python main.py                  # Open graphical Game Library
+python main.py roms/contra.nes  # Or launch a ROM directly
 ```
-
-### 2. Add your own `.nes` ROMs
-
-Place your legally-owned `.nes` ROM files inside `roms/`:
-```text
-Retroplay-nes-emulator/
-  roms/
-    contra.nes
-    mario3.nes
-```
-
-### 3. Play
-
-```bash
-# Open the graphical Game Library
-python main.py
-
-# Or launch a ROM directly
-python main.py roms/contra.nes
-python main.py roms/contra.nes --fullscreen
-```
-
-On Windows, you can also double-click `play.bat` or `play_fullscreen_16x9.bat`.
 
 ---
 

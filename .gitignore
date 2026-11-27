@@ -2,6 +2,10 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+.venv/
+build/
+dist/
+*.spec
 /roms/*
 !/roms/README.md
 *.nes

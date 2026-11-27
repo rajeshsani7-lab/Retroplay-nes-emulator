@@ -7,58 +7,71 @@ echo   RetroPlay NES Emulator - Launcher
 echo =============================================
 echo.
 
-REM 1. Try Python 3.12 direct executable in AppData
+REM 1. Prefer local .venv if already set up
+if exist ".venv\Scripts\python.exe" (
+    set "PYCMD=.venv\Scripts\python.exe"
+    goto :check_deps
+)
+
+REM 2. Find system Python
 if exist "%LOCALAPPDATA%\Programs\Python\Python312\python.exe" (
-    set "PYCMD=%LOCALAPPDATA%\Programs\Python\Python312\python.exe"
-    goto :found
+    set "BASE_PY=%LOCALAPPDATA%\Programs\Python\Python312\python.exe"
+    goto :have_base
 )
-
-REM 2. Try Python 3.12 via py launcher
-py -3.12 -c "import numpy, pygame" >nul 2>&1
+where py >nul 2>&1
 if %errorlevel%==0 (
-    set "PYCMD=py -3.12"
-    goto :found
+    set "BASE_PY=py -3"
+    goto :have_base
 )
-
-REM 3. Try standard python in PATH
-python -c "import numpy, pygame" >nul 2>&1
+where python >nul 2>&1
 if %errorlevel%==0 (
-    set "PYCMD=python"
-    goto :found
+    set "BASE_PY=python"
+    goto :have_base
 )
 
-REM 4. Try default py launcher
-py -c "import numpy, pygame" >nul 2>&1
-if %errorlevel%==0 (
-    set "PYCMD=py"
-    goto :found
-)
-
-echo ERROR: Python with numpy, pygame-ce, or numba was not found.
-echo Please run:
-echo   pip install -r requirements.txt
+echo ERROR: Python 3.10+ was not found on this PC.
+echo Download Python from: https://www.python.org/downloads/
+echo (Important: check "Add Python to PATH" during install)
 echo.
 pause
 exit /b 1
 
-:found
-REM Check if a ROM was passed as argument
+:have_base
+REM If system Python already has pygame-ce, numpy, and numba, use it directly
+"%BASE_PY%" -c "import pygame, numpy, numba" >nul 2>&1
+if %errorlevel%==0 (
+    set "PYCMD=%BASE_PY%"
+    goto :launch
+)
+
+echo First-time setup: creating local environment and installing dependencies...
+"%BASE_PY%" -m venv .venv
+if not exist ".venv\Scripts\python.exe" (
+    echo Failed to create .venv. Please run: pip install -r requirements.txt
+    pause
+    exit /b 1
+)
+set "PYCMD=.venv\Scripts\python.exe"
+"%PYCMD%" -m pip install --upgrade pip >nul 2>&1
+"%PYCMD%" -m pip install -r requirements.txt
+if not %errorlevel%==0 (
+    echo Dependency install failed. Check your internet connection and try again.
+    pause
+    exit /b 1
+)
+goto :launch
+
+:check_deps
+"%PYCMD%" -c "import pygame, numpy, numba" >nul 2>&1
+if not %errorlevel%==0 (
+    echo Installing missing dependencies...
+    "%PYCMD%" -m pip install -r requirements.txt
+)
+
+:launch
 if not "%~1"=="" (
-    %PYCMD% main.py "%~1" --scale 3
-    goto :end
-)
-
-echo.
-echo Select Display Mode:
-echo   [1] 16:9 Widescreen Fullscreen (Recommended)
-echo   [2] Windowed Mode (Scale x3)
-echo.
-set /p MODE="Enter choice (1 or 2, default=1): "
-if "%MODE%"=="2" (
-    %PYCMD% main.py --scale 3
+    "%PYCMD%" main.py "%~1"
 ) else (
-    %PYCMD% main.py --fullscreen
+    "%PYCMD%" main.py
 )
-
-:end
-pause
+if not %errorlevel%==0 pause
