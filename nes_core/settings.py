@@ -18,7 +18,7 @@ SETTINGS_PATH = os.path.join(get_app_dir(), "settings.json")
 DEFAULT_SETTINGS = {
     "video": {
         "theme": "light",          # "light" = Retro Light, "dark" = Midnight Dark
-        "fullscreen": False,
+        "fullscreen": True,
         "aspect_mode": "16:9",     # "16:9", "4:3", "1:1"
         "scale": 3,                # 2, 3, 4
         "smooth_scaling": False,   # False = crisp nearest-neighbor, True = smooth bilinear

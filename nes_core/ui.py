@@ -731,8 +731,8 @@ class EmulatorUI:
         top_y = 82
         content_h = h - top_y - 44
 
-        two_col = (w >= 860)
-        side_w = 320 if two_col else 0
+        two_col = (w >= 740)
+        side_w = (320 if w >= 940 else 280) if two_col else 0
         list_w = w - margin * 2 - (side_w + 20 if two_col else 0)
 
         # Left Panel: Console Game Library with 3D plastic bevel & dark faceplate bar
