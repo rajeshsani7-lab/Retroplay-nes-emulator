@@ -6,9 +6,11 @@ __pycache__/
 build/
 dist/
 *.spec
+*.nes
 /roms/*
 !/roms/README.md
-*.nes
+!/roms/2048 (Homebrew).nes
+!/roms/Snake (Homebrew).nes
 *.state
 /saves/
 /screenshots/
