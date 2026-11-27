@@ -1,7 +1,10 @@
 # RetroPlay — NES Emulator
 
 [![CI](https://github.com/rajeshsani7-lab/Retroplay-nes-emulator/actions/workflows/ci.yml/badge.svg)](https://github.com/rajeshsani7-lab/Retroplay-nes-emulator/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-crimson.svg)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/rajeshsani7-lab/Retroplay-nes-emulator?label=Download%20Windows%20.EXE&color=crimson)](https://github.com/rajeshsani7-lab/Retroplay-nes-emulator/releases/latest/download/RetroPlay-NES-Windows.zip)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+> **Quick Download (Windows — No Python Needed):** [**Download RetroPlay-NES-Windows.zip (Latest Release)**](https://github.com/rajeshsani7-lab/Retroplay-nes-emulator/releases/latest/download/RetroPlay-NES-Windows.zip) — unzip and double-click `RetroPlay.exe` to play right away!
 
 An open-source **NES (Nintendo Entertainment System) emulator** written in Python, accelerated with **Numba JIT** for locked 60.1 FPS gameplay, crisp 44.1 kHz audio, universal controller support, and a nostalgic **Retro Light** hardware interface.
 
