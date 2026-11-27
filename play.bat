@@ -2,30 +2,29 @@
 title RetroPlay NES Emulator
 cd /d "%~dp0"
 
-echo =============================================
-echo   RetroPlay NES Emulator - Launcher
-echo =============================================
-echo.
-
 REM 1. Prefer local .venv if already set up
 if exist ".venv\Scripts\python.exe" (
     set "PYCMD=.venv\Scripts\python.exe"
+    set "PYW=.venv\Scripts\pythonw.exe"
     goto :check_deps
 )
 
 REM 2. Find system Python
 if exist "%LOCALAPPDATA%\Programs\Python\Python312\python.exe" (
     set "BASE_PY=%LOCALAPPDATA%\Programs\Python\Python312\python.exe"
+    set "BASE_PYW=%LOCALAPPDATA%\Programs\Python\Python312\pythonw.exe"
     goto :have_base
 )
 where py >nul 2>&1
 if %errorlevel%==0 (
     set "BASE_PY=py -3"
+    set "BASE_PYW=pyw -3"
     goto :have_base
 )
 where python >nul 2>&1
 if %errorlevel%==0 (
     set "BASE_PY=python"
+    set "BASE_PYW=pythonw"
     goto :have_base
 )
 
@@ -37,10 +36,10 @@ pause
 exit /b 1
 
 :have_base
-REM If system Python already has pygame-ce, numpy, and numba, use it directly
 "%BASE_PY%" -c "import pygame, numpy, numba" >nul 2>&1
 if %errorlevel%==0 (
     set "PYCMD=%BASE_PY%"
+    set "PYW=%BASE_PYW%"
     goto :launch
 )
 
@@ -52,6 +51,7 @@ if not exist ".venv\Scripts\python.exe" (
     exit /b 1
 )
 set "PYCMD=.venv\Scripts\python.exe"
+set "PYW=.venv\Scripts\pythonw.exe"
 "%PYCMD%" -m pip install --upgrade pip >nul 2>&1
 "%PYCMD%" -m pip install -r requirements.txt
 if not %errorlevel%==0 (
@@ -69,9 +69,25 @@ if not %errorlevel%==0 (
 )
 
 :launch
+if exist "%PYW%" (
+    if not "%~1"=="" (
+        start "" "%PYW%" main.py "%~1"
+    ) else (
+        start "" "%PYW%" main.py
+    )
+    exit /b 0
+)
+where "%PYW%" >nul 2>&1
+if %errorlevel%==0 (
+    if not "%~1"=="" (
+        start "" %PYW% main.py "%~1"
+    ) else (
+        start "" %PYW% main.py
+    )
+    exit /b 0
+)
 if not "%~1"=="" (
     "%PYCMD%" main.py "%~1"
 ) else (
     "%PYCMD%" main.py
 )
-if not %errorlevel%==0 pause
