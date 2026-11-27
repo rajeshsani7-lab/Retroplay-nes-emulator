@@ -40,7 +40,7 @@ except ImportError:
 
 from nes_core.cartridge   import Cartridge
 from nes_core.bus         import Bus
-from nes_core.settings    import load_settings, save_settings
+from nes_core.settings    import load_settings, save_settings, get_app_dir
 from nes_core.ui          import EmulatorUI
 from nes_core.controllers import GamepadManager
 
@@ -71,7 +71,7 @@ class NESEmulator:
         self.frame_count = 0
         self.paused = False
         self.running = True
-        self.rom_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "roms")
+        self.rom_dir = os.path.join(get_app_dir(), "roms")
         self.rom_path = rom_path
 
         # Enable 1ms Windows timer precision so time.sleep() never overshoots by 15ms
@@ -580,7 +580,7 @@ class NESEmulator:
     def _take_screenshot(self):
         if not self.bus:
             return
-        shot_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "screenshots")
+        shot_dir = os.path.join(get_app_dir(), "screenshots")
         os.makedirs(shot_dir, exist_ok=True)
         base = os.path.splitext(os.path.basename(self.rom_path))[0]
         fname = f"{base}_{int(time.time())}.png"

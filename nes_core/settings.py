@@ -2,9 +2,18 @@
 
 import json
 import os
+import sys
 import pygame
 
-SETTINGS_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "settings.json")
+
+def get_app_dir() -> str:
+    """Return the folder containing RetroPlay.exe (when frozen) or the project root."""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+SETTINGS_PATH = os.path.join(get_app_dir(), "settings.json")
 
 DEFAULT_SETTINGS = {
     "video": {

@@ -183,5 +183,16 @@ class TestGamepadManager(unittest.TestCase):
         pygame.quit()
 
 
+class TestFrozenPaths(unittest.TestCase):
+    def test_get_app_dir_frozen_exe(self):
+        import sys
+        from unittest.mock import patch
+        from nes_core.settings import get_app_dir
+
+        with patch.object(sys, "frozen", True, create=True), \
+             patch.object(sys, "executable", os.path.join(os.path.abspath(os.sep), "Games", "RetroPlay", "RetroPlay.exe")):
+            self.assertEqual(get_app_dir(), os.path.join(os.path.abspath(os.sep), "Games", "RetroPlay"))
+
+
 if __name__ == '__main__':
     unittest.main()
